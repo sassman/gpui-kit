@@ -16,7 +16,7 @@ pub use decoration::{DiffDecoration, DiffGutterMarker};
 pub use document::{DiffFile, DiffFileStatus, DiffLinePosition, DiffLineRange, DiffSide};
 pub use parser::{DiffParseError, DiffParseOptions};
 pub use presentation::DiffInlineUnit;
-pub use state::{DiffEvent, DiffState};
+pub use state::{DiffEvent, DiffFold, DiffState};
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
@@ -619,6 +619,8 @@ fn render_diff(
         selected_lines: state.selected_lines(),
         selected: state.selected_span(),
         geometry: state.geometry().clone(),
+        folds: state.folds().to_vec(),
+        revealed_folds: state.revealed_folds().clone(),
         state: cx.entity(),
     });
     let rows = state.rows().clone();
@@ -911,6 +913,8 @@ struct CodePresentation {
     selected_lines: Option<DiffLineRange>,
     selected: Option<SelectedLines>,
     geometry: Rc<std::cell::RefCell<selection::SelectionGeometry>>,
+    folds: Vec<DiffFold>,
+    revealed_folds: std::collections::HashSet<usize>,
     state: Entity<DiffState>,
 }
 
@@ -1022,6 +1026,7 @@ fn render_row(
         DisplayRow::Notice(file) => render_notice(&code.files[*file], cx),
         DisplayRow::Hunk { file, hunk } => render_hunk_separator(*file, *hunk, &code, cx),
         DisplayRow::Fold { file, pairs } => render_fold(*file, pairs.clone(), &code, cx),
+        DisplayRow::FoldedRange { fold, .. } => render_folded_range(*fold, &code, cx),
         DisplayRow::Conflict {
             file,
             conflict,
@@ -1169,6 +1174,39 @@ fn render_fold(
                 })
                 .label(t!("Diff.UnchangedLines", count = pairs.len()).to_string())
                 .accessibility_label(t!("Diff.ExpandLines", count = pairs.len()).to_string()),
+        )
+        .into_any_element()
+}
+
+/// The placeholder of an application-defined fold: the label behind a
+/// chevron that reveals the folded rows, or folds them back. The lighter
+/// tint sets it apart from the unchanged-lines separators.
+fn render_folded_range(fold: usize, code: &CodePresentation, cx: &App) -> AnyElement {
+    let Some(spec) = code.folds.get(fold) else {
+        return div().into_any_element();
+    };
+    let revealed = code.revealed_folds.contains(&fold);
+    let state = code.state.clone();
+    h_flex()
+        .w_full()
+        .h_6()
+        .px_2()
+        .bg(cx.theme().muted.opacity(0.15))
+        .child(
+            Button::new(("folded-range", fold))
+                .ghost()
+                .xsmall()
+                .w_auto()
+                .text_color(cx.theme().muted_foreground)
+                .icon(if revealed {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .label(spec.label().to_string())
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |state, cx| state.toggle_fold_revealed(fold, cx))
+                }),
         )
         .into_any_element()
 }

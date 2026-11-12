@@ -51,6 +51,12 @@ pub(crate) enum DisplayRow {
         modified: Option<usize>,
         changed: bool,
     },
+    /// The placeholder of an application-defined fold; while the fold is
+    /// revealed it stays above the block as the control that folds it back.
+    FoldedRange {
+        file: usize,
+        fold: usize,
+    },
 }
 
 impl DisplayRow {
@@ -59,6 +65,7 @@ impl DisplayRow {
             Self::File(file) | Self::Notice(file) => *file,
             Self::Hunk { file, .. }
             | Self::Fold { file, .. }
+            | Self::FoldedRange { file, .. }
             | Self::Conflict { file, .. }
             | Self::Code { file, .. } => *file,
         }
@@ -92,6 +99,60 @@ pub enum DiffEvent {
     /// The user resolved a merge conflict, or undid its resolution; read it
     /// with [`DiffState::conflict_resolution`].
     ConflictResolved(SharedString, usize),
+}
+
+/// A line range the application folds behind one labeled placeholder row,
+/// for content the reader may skip, such as code moved verbatim from
+/// elsewhere. The placeholder shows the label; clicking it reveals the lines
+/// and clicking again folds them back. A fold whose path or lines match no
+/// displayed row is silently invisible, and a collapsed file hides its folds
+/// with the rest of its rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffFold {
+    path: SharedString,
+    side: DiffSide,
+    start: usize,
+    lines: usize,
+    label: SharedString,
+}
+
+impl DiffFold {
+    /// Folds `lines` lines of `path` starting at the one-based line `start`,
+    /// counted on `side` of the comparison, behind `label`.
+    pub fn new(
+        path: impl Into<SharedString>,
+        side: DiffSide,
+        start: usize,
+        lines: usize,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            side,
+            start,
+            lines,
+            label: label.into(),
+        }
+    }
+    pub fn path(&self) -> &SharedString {
+        &self.path
+    }
+    pub fn side(&self) -> DiffSide {
+        self.side
+    }
+    /// The one-based first folded line on [`Self::side`].
+    pub fn start(&self) -> usize {
+        self.start
+    }
+    pub fn lines(&self) -> usize {
+        self.lines
+    }
+    pub fn label(&self) -> &SharedString {
+        &self.label
+    }
+    fn contains(&self, line: usize) -> bool {
+        (self.start..self.start + self.lines).contains(&line)
+    }
 }
 
 /// Inputs that determine row heights and content width.
@@ -219,6 +280,9 @@ pub struct DiffState {
     min_collapsed_lines: usize,
     expanded: Vec<Vec<Range<usize>>>,
     collapsed: HashSet<SharedString>,
+    folds: Vec<DiffFold>,
+    /// Indices into `folds` whose rows show; reset with the fold set.
+    revealed_folds: HashSet<usize>,
     resolutions: HashMap<(SharedString, usize), DiffConflictResolution>,
     file_rows: Vec<FileRows>,
     header_rows: Vec<usize>,
@@ -352,6 +416,8 @@ impl DiffState {
             expansion_lines: 20,
             min_collapsed_lines: 2,
             collapsed: HashSet::new(),
+            folds: Vec::new(),
+            revealed_folds: HashSet::new(),
             resolutions: HashMap::new(),
             file_rows: Vec::new(),
             header_rows: Vec::new(),
@@ -661,6 +727,9 @@ impl DiffState {
         self.file_ixs = file_ixs(&self.files);
         self.collapsed
             .retain(|path| self.file_ixs.contains_key(path));
+        // Folds point into one revision's lines; a new patch starts clean.
+        self.folds.clear();
+        self.revealed_folds.clear();
         self.resolutions.clear();
         self.expanded = vec![Vec::new(); self.files.len()];
         self.reset_presentation();
@@ -786,6 +855,56 @@ impl DiffState {
             self.rebuild_at_anchor();
             cx.notify();
         }
+    }
+
+    /// Replaces the application-defined folds in one rebuild, hiding every
+    /// fold's lines again. Like [`Self::set_files_collapsed`], folds that
+    /// match nothing are silently invisible. [`Self::set_files`] clears the
+    /// set, since folds point into one revision's lines.
+    pub fn set_folds(&mut self, folds: impl IntoIterator<Item = DiffFold>, cx: &mut Context<Self>) {
+        let folds: Vec<DiffFold> = folds.into_iter().collect();
+        if self.folds == folds && self.revealed_folds.is_empty() {
+            return;
+        }
+        self.folds = folds;
+        self.revealed_folds.clear();
+        self.rebuild_at_anchor();
+        cx.notify();
+    }
+
+    /// The application-defined folds, in the order they were set; row
+    /// placeholders index into this slice.
+    pub fn folds(&self) -> &[DiffFold] {
+        &self.folds
+    }
+
+    /// Whether the fold at `ix` of [`Self::folds`] currently shows its lines.
+    pub fn is_fold_revealed(&self, ix: usize) -> bool {
+        self.revealed_folds.contains(&ix)
+    }
+
+    /// Shows or hides the lines of the fold at `ix` of [`Self::folds`].
+    pub fn set_fold_revealed(&mut self, ix: usize, revealed: bool, cx: &mut Context<Self>) {
+        if ix >= self.folds.len() {
+            return;
+        }
+        let changed = if revealed {
+            self.revealed_folds.insert(ix)
+        } else {
+            self.revealed_folds.remove(&ix)
+        };
+        if changed {
+            self.rebuild_at_anchor();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_fold_revealed(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.set_fold_revealed(ix, !self.is_fold_revealed(ix), cx);
+    }
+
+    pub(crate) fn revealed_folds(&self) -> &HashSet<usize> {
+        &self.revealed_folds
     }
 
     /// The resolution of conflict `ix` in the file at `path`, if any.
@@ -1374,6 +1493,7 @@ impl DiffState {
             DisplayRow::File(_)
             | DisplayRow::Notice(_)
             | DisplayRow::Hunk { .. }
+            | DisplayRow::FoldedRange { .. }
             | DisplayRow::Conflict { .. } => self
                 .rows
                 .get(ix + 1)
@@ -1482,7 +1602,60 @@ impl DiffState {
                 );
             }
         }
-        rows
+        if self.folds.is_empty() {
+            rows
+        } else {
+            self.apply_folds(rows)
+        }
+    }
+
+    /// Replaces each fold's code rows with its placeholder, or keeps them
+    /// under it while the fold is revealed. The placeholder sits where the
+    /// first folded row was; rows a collapsed file never projected need no
+    /// handling here, which is what lets file collapse win over folds.
+    fn apply_folds(&self, rows: Vec<DisplayRow>) -> Vec<DisplayRow> {
+        let mut out = Vec::with_capacity(rows.len());
+        let mut placed = vec![false; self.folds.len()];
+        for row in rows {
+            let Some(fold) = self.fold_containing(&row) else {
+                out.push(row);
+                continue;
+            };
+            if !placed[fold] {
+                placed[fold] = true;
+                out.push(DisplayRow::FoldedRange {
+                    file: row.file(),
+                    fold,
+                });
+            }
+            if self.revealed_folds.contains(&fold) {
+                out.push(row);
+            }
+        }
+        out
+    }
+
+    /// The first fold holding the row's line on the fold's side. Only code
+    /// rows fold; headers, notices and separators stay visible.
+    fn fold_containing(&self, row: &DisplayRow) -> Option<usize> {
+        let DisplayRow::Code {
+            file,
+            original,
+            modified,
+            ..
+        } = row
+        else {
+            return None;
+        };
+        let document = &self.files[*file];
+        self.folds.iter().position(|fold| {
+            fold.path() == document.path()
+                && match fold.side() {
+                    DiffSide::Original => original,
+                    DiffSide::Modified => modified,
+                }
+                .is_some_and(|ix| fold.contains(document.line_number(fold.side(), ix)))
+        })
     }
 
     /// Applies the row-height hint again once the list has laid out at a new
@@ -1635,9 +1808,13 @@ fn source_rows(files: &[DiffFile], rows: &[DisplayRow]) -> Vec<FileRows> {
                     map(*file, pair.original(), pair.modified());
                 }
             }
+            // A folded range maps none of its hidden lines: revealed rows map
+            // themselves, and a hidden line cannot be scrolled to or anchor a
+            // selection until the reader reveals it.
             DisplayRow::File(_)
             | DisplayRow::Notice(_)
             | DisplayRow::Hunk { .. }
+            | DisplayRow::FoldedRange { .. }
             | DisplayRow::Conflict { .. } => {}
         }
     }
