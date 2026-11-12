@@ -3,8 +3,8 @@ use std::{cell::RefCell, rc::Rc};
 use gpui::{AppContext, Empty, ListOffset, TestAppContext, px, size};
 
 use super::{
-    DiffEvent, DiffFile, DiffFileStatus, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
-    DiffState,
+    DiffEvent, DiffFile, DiffFileStatus, DiffFold, DiffLinePosition, DiffLineRange, DiffMode,
+    DiffSide, DiffState,
     state::{DisplayRow, FoldExpansion},
 };
 
@@ -147,6 +147,114 @@ fn folds_expand_by_direction_and_short_ranges_stay_visible(cx: &mut TestAppConte
         assert_eq!(folds(state), [0..27]);
         assert_eq!(state.min_collapsed_lines(), 26);
         assert_eq!(state.expansion_lines(), 20);
+    });
+}
+
+const MOVED_PATCH: &str = "diff --git a/moved.txt b/moved.txt\n--- a/moved.txt\n+++ b/moved.txt\n@@ -1,3 +1,6 @@\n one\n+alpha\n+beta\n+gamma\n two\n three\n";
+
+fn folded_range_rows(state: &DiffState) -> Vec<usize> {
+    state
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            DisplayRow::FoldedRange { fold, .. } => Some(*fold),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn folded_ranges_hide_behind_one_placeholder_and_reveal_on_demand(cx: &mut TestAppContext) {
+    let state = cx.new(|cx| DiffState::new(DiffFile::parse(MOVED_PATCH).unwrap(), cx));
+    state.update(cx, |state, cx| {
+        let all = code_rows(state, 0);
+        assert_eq!(all, 6);
+        state.set_folds(
+            [DiffFold::new(
+                "moved.txt",
+                DiffSide::Modified,
+                2,
+                3,
+                "moved from a.rs:10-12",
+            )],
+            cx,
+        );
+        assert_eq!(code_rows(state, 0), all - 3);
+        assert_eq!(folded_range_rows(state), [0]);
+        assert_eq!(state.folds()[0].label().as_str(), "moved from a.rs:10-12");
+
+        // Revealing keeps the placeholder above the block to fold it back.
+        state.toggle_fold_revealed(0, cx);
+        assert!(state.is_fold_revealed(0));
+        assert_eq!(code_rows(state, 0), all);
+        assert_eq!(folded_range_rows(state), [0]);
+        let placeholder = state
+            .rows()
+            .iter()
+            .position(|row| matches!(row, DisplayRow::FoldedRange { .. }))
+            .unwrap();
+        assert!(matches!(
+            state.rows()[placeholder + 1],
+            DisplayRow::Code { .. }
+        ));
+
+        state.set_fold_revealed(0, false, cx);
+        assert_eq!(code_rows(state, 0), all - 3);
+
+        // A new fold set starts hidden again; a new patch clears the set.
+        state.toggle_fold_revealed(0, cx);
+        state.set_folds(
+            [DiffFold::new(
+                "moved.txt",
+                DiffSide::Modified,
+                2,
+                3,
+                "moved from a.rs:10-12",
+            )],
+            cx,
+        );
+        assert!(!state.is_fold_revealed(0));
+        state.set_files(DiffFile::parse(MOVED_PATCH).unwrap(), cx);
+        assert!(state.folds().is_empty());
+        assert_eq!(code_rows(state, 0), all);
+    });
+}
+
+#[gpui::test]
+fn folds_matching_nothing_stay_invisible_and_file_collapse_wins(cx: &mut TestAppContext) {
+    let state = cx.new(|cx| DiffState::new(DiffFile::parse(MOVED_PATCH).unwrap(), cx));
+    state.update(cx, |state, cx| {
+        let all = code_rows(state, 0);
+        // Unknown path and out-of-range lines bite nothing; an old-side fold
+        // hides the context pairs its lines sit on.
+        state.set_folds(
+            [
+                DiffFold::new("missing.txt", DiffSide::Modified, 2, 3, "elsewhere"),
+                DiffFold::new("moved.txt", DiffSide::Modified, 40, 3, "past the end"),
+                DiffFold::new("moved.txt", DiffSide::Original, 2, 3, "context by old side"),
+            ],
+            cx,
+        );
+        // Only the old-side fold matches rows: context lines 2 and 3.
+        assert_eq!(folded_range_rows(state), [2]);
+        assert_eq!(code_rows(state, 0), all - 2);
+
+        // A collapsed file keeps its folds invisible with the rest.
+        state.set_folds(
+            [DiffFold::new(
+                "moved.txt",
+                DiffSide::Modified,
+                2,
+                3,
+                "moved",
+            )],
+            cx,
+        );
+        state.set_file_collapsed("moved.txt", true, cx);
+        assert_eq!(code_rows(state, 0), 0);
+        assert!(folded_range_rows(state).is_empty());
+        state.set_file_collapsed("moved.txt", false, cx);
+        assert_eq!(folded_range_rows(state), [0]);
     });
 }
 
