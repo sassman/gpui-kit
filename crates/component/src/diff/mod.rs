@@ -1284,9 +1284,22 @@ fn render_file_header(
     };
     let state = code.state.clone();
     let name = document.path().clone();
+    // The row lives inside the horizontally scrolled strip, but the header
+    // and the file's cards must never leave the viewport: they take the
+    // viewport's width and cancel the strip's offset. Before the first
+    // paint the viewport is unknown; the row's own width stands in.
+    let scrolled = code.state.read(cx);
+    let pin = -scrolled.horizontal_scroll().offset().x;
+    let viewport = scrolled.viewport().width;
     v_flex()
         .id("file-header")
-        .w_full()
+        .map(|this| {
+            if viewport > px(0.) {
+                this.w(viewport).ml(pin)
+            } else {
+                this.w_full()
+            }
+        })
         .when(file > 0, |this| this.border_t_1())
         .border_b_1()
         .border_color(border)
