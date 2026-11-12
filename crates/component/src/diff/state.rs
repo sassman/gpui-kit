@@ -1049,7 +1049,8 @@ impl DiffState {
     }
 
     /// Reveals and scrolls to a source line, expanding its file and hidden
-    /// context if needed.
+    /// context if needed. The line lands below the pinned file header, not
+    /// under it.
     pub fn scroll_to_line(&mut self, position: DiffLinePosition, cx: &mut Context<Self>) {
         if self.line_index(&position).is_none() {
             return;
@@ -1059,7 +1060,25 @@ impl DiffState {
         }
         if self.expand_line(&position).is_some() {
             self.reveal_line(&position);
+            self.clear_pinned_header(&position);
             cx.notify();
+        }
+    }
+
+    /// Scrolls up by the pinned header bar's height, so a line revealed at
+    /// the viewport top is readable rather than covered by the overlay. The
+    /// file's header row gives the bar's height when it was rendered;
+    /// otherwise two code rows stand in, over-clearing a little rather than
+    /// leaving the line hidden. [`reveal_line`](Self::reveal_line) stays
+    /// exact for anchor restoration, which must not drift per rebuild.
+    fn clear_pinned_header(&self, position: &DiffLinePosition) {
+        let measured = self
+            .file_ix(position.path())
+            .and_then(|file| self.header_rows.get(file))
+            .and_then(|&ix| self.list.bounds_for_item(ix))
+            .map(|bounds| bounds.size.height);
+        if let Some(clearance) = measured.or_else(|| self.row_height.map(|height| height * 2.)) {
+            self.list.scroll_by(-clearance);
         }
     }
 

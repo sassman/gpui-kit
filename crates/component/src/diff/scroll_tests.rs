@@ -3,7 +3,7 @@ use gpui::{
     ScrollEvent, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
 };
 
-use super::{Diff, DiffState, document::fixture};
+use super::{Diff, DiffLinePosition, DiffSide, DiffState, document::fixture};
 
 /// Every line changed, so the unified patch is two rows per line.
 const LINES: usize = 300;
@@ -81,6 +81,31 @@ fn the_wheel_scrolls_past_the_rows_rendered_so_far(cx: &mut TestAppContext) {
     let top = cx.update(|_, cx| state.read(cx).list().logical_scroll_top().item_ix);
     // 2000 px of wheel travel crosses far more than the first screen of rows.
     assert!(top > 40, "scrolled to row {top}");
+}
+
+#[gpui::test]
+fn a_revealed_line_lands_below_the_pinned_header(cx: &mut TestAppContext) {
+    let (state, cx) = long_patch(cx);
+    let position = DiffLinePosition::new("long.txt", DiffSide::Modified, 150);
+    state.update(cx, |state, cx| state.scroll_to_line(position.clone(), cx));
+    for _ in 0..3 {
+        draw(cx);
+    }
+    let (gap, row_height) = cx.update(|_, cx| {
+        let state = state.read(cx);
+        let row = state.source_row(&position).expect("line has a row");
+        let list = state.list();
+        let bounds = list.bounds_for_item(row).expect("target row is rendered");
+        (
+            bounds.top() - list.viewport_bounds().top(),
+            bounds.size.height,
+        )
+    });
+    // Flush to the top the line would sit under the pinned header overlay.
+    assert!(
+        gap >= row_height,
+        "line {gap:?} below the viewport top, rows {row_height:?} tall"
+    );
 }
 
 /// Wraps its lines, so rows are taller than the height the list estimates.
