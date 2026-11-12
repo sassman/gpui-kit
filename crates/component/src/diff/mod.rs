@@ -22,10 +22,10 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, Axis, ClickEvent, ClipboardItem, Context, ElementId, Entity, Focusable as _,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListOffset,
-    MouseButton, ParentElement as _, Pixels, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun, Window, div, list, point,
-    prelude::FluentBuilder as _, px,
+    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, Length, ListOffset,
+    MouseButton, ParentElement as _, Pixels, RenderOnce, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun, Window, div, list,
+    prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::TestSupportExt as _;
 use rust_i18n::t;
@@ -552,31 +552,33 @@ fn render_diff(
     );
     if state.update_layout(layout, row_height) {
         // Wrapped rows take the viewport width instead of their longest line.
-        let width = if soft_wrap {
+        let widths = if soft_wrap {
+            [px(0.); 2]
+        } else {
+            measure_code_text_widths(state.files(), font_size, &font_family, window, cx)
+        };
+        state.set_split_code_widths(widths);
+        state.set_content_width(if soft_wrap {
             px(0.)
         } else {
-            measure_code_width(
-                state.files(),
-                font_size,
-                &font_family,
+            code_width(
+                widths[0].max(widths[1]),
                 gutter_width,
                 lane_width,
+                rem,
                 mode,
-                window,
-                cx,
             )
-        };
-        state.set_content_width(width);
+        });
     }
     state.sync_annotations(&props.annotations.items);
+    // Split panels share the viewport by `split_ratio` and scroll their code
+    // inside, so neither column needs room for its longest line; only unified
+    // mode still sizes the strip to its content.
+    let panel_split = mode == DiffMode::Split && !soft_wrap;
     let viewport_width = state.viewport().width;
     let (content_width, column_width, modified_width) = if mode == DiffMode::Split {
-        // Each column keeps room for its longest line; the ratio divides
-        // whatever the viewport adds beyond that.
-        let half = state.content_width() / 2.;
-        let original = (viewport_width * props.split_ratio).max(half);
-        let modified = (viewport_width * (1. - props.split_ratio)).max(half);
-        (original + modified, original, modified)
+        let original = viewport_width * props.split_ratio;
+        (viewport_width, original, viewport_width - original)
     } else {
         let width = state.content_width().max(viewport_width);
         (width, width, width)
@@ -611,6 +613,8 @@ fn render_diff(
         on_add_annotation: props.on_add_annotation,
         on_line_click: props.on_line_click,
         on_line_hover: props.on_line_hover,
+        split_scroll: panel_split.then(|| state.split_scroll().clone()),
+        split_code_widths: state.split_code_widths(),
         selection: state.selection().clone(),
         selected_lines: state.selected_lines(),
         selected: state.selected_span(),
@@ -620,6 +624,7 @@ fn render_diff(
     let rows = state.rows().clone();
     let scrollbar = state.list().clone();
     let horizontal = state.horizontal_scroll().clone();
+    let split = state.split_scroll().clone();
     let has_rows = !rows.is_empty();
     let label = match state.files() {
         [file] => t!("Diff.Viewer", name = file.path().as_str()).to_string(),
@@ -650,7 +655,11 @@ fn render_diff(
                             .child(render_row(row, code.clone(), window, cx))
                             .into_any_element()
                     })
-                    .w(content_width)
+                    .w(if panel_split {
+                        Length::from(relative(1.))
+                    } else {
+                        content_width.into()
+                    })
                     .h_full(),
                 ))
                 .into_any_element(),
@@ -660,9 +669,24 @@ fn render_diff(
             state.geometry().clone(),
         ))
         .when(has_rows && !soft_wrap, |this| {
-            this.child(
-                ScrollableMask::new(Axis::Horizontal, &horizontal).id("diff-horizontal-wheel"),
-            )
+            if panel_split {
+                // One wheel mask per panel, so each half routes horizontal
+                // deltas to its own side's offset.
+                this.child(
+                    div().absolute().top_0().bottom_0().left_0().w_1_2().child(
+                        ScrollableMask::new(Axis::Horizontal, &split[0]).id("diff-left-wheel"),
+                    ),
+                )
+                .child(
+                    div().absolute().top_0().bottom_0().right_0().w_1_2().child(
+                        ScrollableMask::new(Axis::Horizontal, &split[1]).id("diff-right-wheel"),
+                    ),
+                )
+            } else {
+                this.child(
+                    ScrollableMask::new(Axis::Horizontal, &horizontal).id("diff-horizontal-wheel"),
+                )
+            }
         })
         .when(has_rows, |this| {
             this.child(
@@ -672,7 +696,24 @@ fn render_diff(
                     .child(Scrollbar::vertical(&scrollbar).viewport_from_layout()),
             )
             .when(!soft_wrap, |this| {
-                this.child(Scrollbar::horizontal(&horizontal))
+                if panel_split {
+                    this.child(
+                        div().absolute().top_0().bottom_0().left_0().w_1_2().child(
+                            Scrollbar::horizontal(&split[0])
+                                .id("diff-left-scrollbar")
+                                .viewport_from_layout(),
+                        ),
+                    )
+                    .child(
+                        div().absolute().top_0().bottom_0().right_0().w_1_2().child(
+                            Scrollbar::horizontal(&split[1])
+                                .id("diff-right-scrollbar")
+                                .viewport_from_layout(),
+                        ),
+                    )
+                } else {
+                    this.child(Scrollbar::horizontal(&horizontal))
+                }
             })
         })
         // A line-number drag may finish anywhere, including outside the body.
@@ -702,18 +743,14 @@ fn render_diff(
             if !body_focused(this, window, cx) {
                 return;
             }
-            let offset = this.horizontal_scroll().offset();
-            this.horizontal_scroll()
-                .set_offset(point(offset.x + window.rem_size() * 3., offset.y));
+            this.scroll_horizontally(window.rem_size() * 3.);
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &ScrollRight, window, cx| {
             if !body_focused(this, window, cx) {
                 return;
             }
-            let offset = this.horizontal_scroll().offset();
-            this.horizontal_scroll()
-                .set_offset(point(offset.x - window.rem_size() * 3., offset.y));
+            this.scroll_horizontally(-window.rem_size() * 3.);
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &PageUp, window, cx| {
@@ -783,13 +820,17 @@ fn render_diff(
                             let rehinted = state.keep_row_height_hint();
                             // The estimate shapes the widest candidates only;
                             // grow to fit any wider line once it is painted.
-                            let painted = if soft_wrap {
+                            let painted = if soft_wrap || panel_split {
                                 px(0.)
                             } else {
                                 let painted = state.geometry().borrow().painted_width();
                                 code_width(painted, gutter_width, lane_width, rem, mode)
                             };
-                            if state.record_paint(bounds.size, painted) || rehinted {
+                            let panel_grew = panel_split && {
+                                let painted = state.geometry().borrow().painted_widths();
+                                state.record_split_paint(painted)
+                            };
+                            if state.record_paint(bounds.size, painted) || rehinted || panel_grew {
                                 cx.notify();
                             }
                         });
@@ -838,6 +879,10 @@ struct CodePresentation {
     column_width: Pixels,
     /// The modified column in split mode.
     modified_width: Pixels,
+    /// `Some` while split panels scroll their own code: each side's shared
+    /// offset, indexed by [`DiffSide::ix`].
+    split_scroll: Option<[ScrollHandle; 2]>,
+    split_code_widths: [Pixels; 2],
     font_size: Pixels,
     row_height: Pixels,
     gutter_width: Pixels,
@@ -901,28 +946,14 @@ fn code_width(
     }
 }
 
-/// Estimates content width from the lines widest in display cells, then
-/// shapes those candidates with the code font for resolved geometry.
-#[allow(clippy::too_many_arguments)]
-fn measure_code_width(
-    files: &[DiffFile],
-    font_size: Pixels,
-    family: &SharedString,
-    gutter_width: Pixels,
-    lane_width: Pixels,
-    mode: DiffMode,
-    window: &mut Window,
-    cx: &App,
-) -> Pixels {
-    // Glyph widths vary within a font, so shape several candidates rather
-    // than trusting the single widest by cell count.
-    const CANDIDATES: usize = 8;
-    let mut candidates: Vec<(usize, &SharedString)> = Vec::with_capacity(CANDIDATES + 1);
-    for file in files {
-        for side in [DiffSide::Original, DiffSide::Modified] {
+/// Each side's lines widest in display cells, as shaping candidates.
+fn width_candidates(files: &[DiffFile], per_side: usize) -> [Vec<&SharedString>; 2] {
+    [DiffSide::Original, DiffSide::Modified].map(|side| {
+        let mut candidates: Vec<(usize, &SharedString)> = Vec::with_capacity(per_side + 1);
+        for file in files {
             for line in file.lines(side) {
                 let cells = unicode_width::UnicodeWidthStr::width(line.display().as_str());
-                if candidates.len() == CANDIDATES
+                if candidates.len() == per_side
                     && candidates
                         .last()
                         .is_some_and(|(widest, _)| *widest >= cells)
@@ -931,36 +962,53 @@ fn measure_code_width(
                 }
                 let ix = candidates.partition_point(|(widest, _)| *widest >= cells);
                 candidates.insert(ix, (cells, line.display()));
-                candidates.truncate(CANDIDATES);
+                candidates.truncate(per_side);
             }
         }
-    }
+        candidates.into_iter().map(|(_, line)| line).collect()
+    })
+}
+
+/// Estimates each side's code text width from the lines widest in display
+/// cells, then shapes those candidates with the code font for resolved
+/// geometry. Split panels clamp their scroll to their own side's width.
+fn measure_code_text_widths(
+    files: &[DiffFile],
+    font_size: Pixels,
+    family: &SharedString,
+    window: &mut Window,
+    cx: &App,
+) -> [Pixels; 2] {
+    // Glyph widths vary within a font, so shape several candidates rather
+    // than trusting the single widest by cell count.
+    const CANDIDATES: usize = 8;
     let font = gpui::Font {
         family: family.clone(),
         ..Default::default()
     };
-    let width = candidates
-        .into_iter()
-        .map(|(_, text)| {
-            window
-                .text_system()
-                .shape_line(
-                    text.clone(),
-                    font_size,
-                    &[TextRun {
-                        len: text.len(),
-                        font: font.clone(),
-                        color: cx.theme().foreground,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                )
-                .width
-        })
-        .fold(px(0.), Pixels::max);
-    code_width(width, gutter_width, lane_width, window.rem_size(), mode)
+    width_candidates(files, CANDIDATES).map(|candidates| {
+        candidates
+            .into_iter()
+            .map(|text| {
+                window
+                    .text_system()
+                    .shape_line(
+                        text.clone(),
+                        font_size,
+                        &[TextRun {
+                            len: text.len(),
+                            font: font.clone(),
+                            color: cx.theme().foreground,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    )
+                    .width
+            })
+            .fold(px(0.), Pixels::max)
+    })
 }
 
 fn render_row(
@@ -1543,10 +1591,17 @@ fn render_unified_cell(
         ]
     };
     v_flex()
-        .w(if single_column {
-            code.content_width
-        } else {
-            code.column_width
+        .map(|this| match (code.split_scroll.is_some(), single_column) {
+            // A single-column file spans both panels; its code still scrolls
+            // with its own side's offset inside `code_line`.
+            (true, true) => this.w_full(),
+            (true, false) => this.w(if side == DiffSide::Original {
+                code.column_width
+            } else {
+                code.modified_width
+            }),
+            (false, true) => this.w(code.content_width),
+            (false, false) => this.w(code.column_width),
         })
         .id((
             if side == DiffSide::Original {
@@ -1733,7 +1788,13 @@ fn code_line(
             if code.soft_wrap {
                 this.w_full()
             } else {
-                this.flex().flex_row().flex_shrink_0()
+                this.flex().flex_row().flex_shrink_0().when(
+                    code.split_scroll.is_some(),
+                    // Every row carries its side's measured width, so the
+                    // shared panel offset clamps the same in each one; the
+                    // rem keeps the longest line clear of the edge.
+                    |this| this.min_w(code.split_code_widths[side.ix()] + code.rem),
+                )
             }
         })
         .children(ranges.into_iter().enumerate().map(|(chunk_ix, range)| {
@@ -1869,6 +1930,14 @@ fn code_line(
                 .map(|this| {
                     if code.soft_wrap {
                         this.flex_1().min_w_0()
+                    } else if let Some(split) = &code.split_scroll {
+                        // The panel clips and shifts only the code: gutters,
+                        // lane and indicator stay put while every cell of a
+                        // side follows one offset.
+                        this.flex_1()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .track_scroll(&split[side.ix()])
                     } else {
                         this.flex_shrink_0()
                     }

@@ -15,6 +15,14 @@ pub enum DiffSide {
 }
 
 impl DiffSide {
+    /// Index for per-side arrays: Original first, Modified second.
+    pub(crate) fn ix(self) -> usize {
+        match self {
+            Self::Original => 0,
+            Self::Modified => 1,
+        }
+    }
+
     pub(crate) fn other(self) -> Self {
         match self {
             Self::Original => Self::Modified,

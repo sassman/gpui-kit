@@ -48,18 +48,27 @@ impl SelectionGeometry {
 
     /// The widest painted source line, measured from its first text run.
     pub fn painted_width(&self) -> Pixels {
-        self.runs
-            .iter()
-            .fold((None, px(0.), px(0.)), |(previous, left, widest), run| {
-                let key = (run.file, run.side, run.line_ix);
-                let left = if previous == Some(key) {
-                    left
-                } else {
-                    run.bounds.left()
-                };
-                (Some(key), left, widest.max(run.bounds.right() - left))
-            })
-            .2
+        let [original, modified] = self.painted_widths();
+        original.max(modified)
+    }
+
+    /// The widest painted source line of each side, indexed by
+    /// [`DiffSide::ix`]. A line's chunks share its first run's left edge, so
+    /// a panel's own scroll shift cancels out of the width.
+    pub fn painted_widths(&self) -> [Pixels; 2] {
+        let mut widest = [px(0.); 2];
+        let mut previous = None;
+        let mut left = px(0.);
+        for run in &self.runs {
+            let key = (run.file, run.side, run.line_ix);
+            if previous != Some(key) {
+                previous = Some(key);
+                left = run.bounds.left();
+            }
+            let side = run.side.ix();
+            widest[side] = widest[side].max(run.bounds.right() - left);
+        }
+        widest
     }
     pub fn key_at(&self, point: Point<Pixels>, side: Option<DiffSide>) -> Option<u64> {
         if let Some((count, position, cursor)) = self.multi_click.get() {

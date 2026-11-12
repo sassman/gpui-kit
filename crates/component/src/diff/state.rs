@@ -226,6 +226,7 @@ pub struct DiffState {
     change_rows: Vec<usize>,
     list: ListState,
     horizontal_scroll: ScrollHandle,
+    split_scroll: [ScrollHandle; 2],
     focus: FocusHandle,
     selection: TextSelectionHandle,
     geometry: Rc<RefCell<SelectionGeometry>>,
@@ -239,6 +240,7 @@ pub struct DiffState {
     viewport: Size<Pixels>,
     layout: Option<LayoutKey>,
     content_width: Pixels,
+    split_code_widths: [Pixels; 2],
     row_height: Option<Pixels>,
     /// The list width the row-height hint was last applied at.
     hinted_width: Option<Pixels>,
@@ -357,6 +359,7 @@ impl DiffState {
             change_rows: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(0.)),
             horizontal_scroll: ScrollHandle::new(),
+            split_scroll: [ScrollHandle::new(), ScrollHandle::new()],
             focus,
             selection,
             geometry,
@@ -373,6 +376,7 @@ impl DiffState {
             viewport: Size::default(),
             layout: None,
             content_width: px(0.),
+            split_code_widths: [px(0.); 2],
             row_height: None,
             hinted_width: None,
             annotations: HashSet::new(),
@@ -577,6 +581,23 @@ impl DiffState {
     pub(crate) fn horizontal_scroll(&self) -> &ScrollHandle {
         &self.horizontal_scroll
     }
+    /// Split mode's per-panel horizontal scroll, indexed by [`DiffSide::ix`].
+    pub(crate) fn split_scroll(&self) -> &[ScrollHandle; 2] {
+        &self.split_scroll
+    }
+    /// Moves the horizontal scroll: the shared strip in unified mode, both
+    /// panels in split mode (prepaint clamps each to its own range).
+    pub(crate) fn scroll_horizontally(&mut self, delta: Pixels) {
+        let handles: &[ScrollHandle] = if self.mode == DiffMode::Split {
+            &self.split_scroll
+        } else {
+            std::slice::from_ref(&self.horizontal_scroll)
+        };
+        for handle in handles {
+            let offset = handle.offset();
+            handle.set_offset(point(offset.x + delta, offset.y));
+        }
+    }
     pub(crate) fn selection(&self) -> &TextSelectionHandle {
         &self.selection
     }
@@ -596,6 +617,25 @@ impl DiffState {
     }
     pub(crate) fn set_content_width(&mut self, width: Pixels) {
         self.content_width = width;
+    }
+    /// Each side's code text width, driving the split panels' scroll ranges.
+    pub(crate) fn split_code_widths(&self) -> [Pixels; 2] {
+        self.split_code_widths
+    }
+    pub(crate) fn set_split_code_widths(&mut self, widths: [Pixels; 2]) {
+        self.split_code_widths = widths;
+    }
+    /// Grows a side's width to a wider painted line, like [`Self::record_paint`]
+    /// does for the shared strip. Returns whether either side grew.
+    pub(crate) fn record_split_paint(&mut self, painted: [Pixels; 2]) -> bool {
+        let mut wider = false;
+        for (width, painted) in self.split_code_widths.iter_mut().zip(painted) {
+            if painted > *width {
+                *width = painted;
+                wider = true;
+            }
+        }
+        wider
     }
     /// Records the painted body size and widest painted row. Returns whether
     /// either changed, so the frame must be laid out again.
@@ -635,6 +675,9 @@ impl DiffState {
         self.geometry.borrow_mut().clear();
         self.rebuild(true);
         self.horizontal_scroll.set_offset(point(px(0.), px(0.)));
+        for handle in &self.split_scroll {
+            handle.set_offset(point(px(0.), px(0.)));
+        }
         self.ensure_presentation(cx);
         cx.notify();
     }
@@ -659,6 +702,9 @@ impl DiffState {
             });
         }
         self.horizontal_scroll.set_offset(point(px(0.), px(0.)));
+        for handle in &self.split_scroll {
+            handle.set_offset(point(px(0.), px(0.)));
+        }
         cx.notify();
     }
 

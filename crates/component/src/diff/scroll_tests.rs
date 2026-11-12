@@ -132,3 +132,91 @@ fn a_mode_switch_at_the_top_keeps_the_file_header_in_view(cx: &mut TestAppContex
         "the file header stays in view"
     );
 }
+
+/// A split patch whose modified side is far wider than the original's.
+fn split_patch(cx: &mut TestAppContext) -> (Entity<DiffState>, &mut VisualTestContext) {
+    cx.update(crate::init);
+    let original = (0..40).map(|ix| format!("o {ix}\n")).collect::<String>();
+    let modified = (0..40)
+        .map(|ix| format!("modified {ix} {}\n", "x".repeat(300)))
+        .collect::<String>();
+    let state =
+        cx.new(|cx| DiffState::new([fixture::modified("wide.txt", &original, &modified)], cx));
+    state.update(cx, |state, cx| {
+        state.set_mode(super::DiffMode::Split, cx);
+    });
+    let (_, cx) = cx.add_window_view({
+        let state = state.clone();
+        move |_, _| Host { state }
+    });
+    for _ in 0..3 {
+        draw(cx);
+    }
+    (state, cx)
+}
+
+fn wheel_at(cx: &mut VisualTestContext, x: f32, delta_x: f32) {
+    cx.simulate_event(ScrollEvent {
+        position: point(px(x), px(100.)),
+        delta: ScrollDelta::Pixels(point(px(delta_x), px(0.))),
+        ..Default::default()
+    });
+    draw(cx);
+}
+
+#[gpui::test]
+fn split_panels_scroll_separately(cx: &mut TestAppContext) {
+    let (state, cx) = split_patch(cx);
+
+    // A wheel over the right half moves only the modified panel.
+    wheel_at(cx, 300., -60.);
+    let offsets = cx.update(|_, cx| {
+        let split = state.read(cx).split_scroll().clone();
+        [split[0].offset().x, split[1].offset().x]
+    });
+    assert_eq!(offsets[0], px(0.));
+    assert!(offsets[1] < px(-50.), "right panel at {:?}", offsets[1]);
+    // The shared strip offset never moves in split mode.
+    let strip = cx.update(|_, cx| state.read(cx).horizontal_scroll().offset().x);
+    assert_eq!(strip, px(0.));
+
+    // The original side has nothing wider than its panel, so a wheel over
+    // the left half scrolls neither panel: the event bubbles to the list.
+    wheel_at(cx, 100., -60.);
+    let offsets = cx.update(|_, cx| {
+        let split = state.read(cx).split_scroll().clone();
+        [split[0].offset().x, split[1].offset().x]
+    });
+    assert_eq!(offsets[0], px(0.));
+    assert!(offsets[1] < px(-50.), "right panel kept {:?}", offsets[1]);
+}
+
+#[gpui::test]
+fn leaving_split_mode_rests_both_panels(cx: &mut TestAppContext) {
+    let (state, cx) = split_patch(cx);
+    wheel_at(cx, 300., -60.);
+    state.update(cx, |state, cx| {
+        state.set_mode(super::DiffMode::Unified, cx);
+    });
+    let offsets = cx.update(|_, cx| {
+        let split = state.read(cx).split_scroll().clone();
+        [split[0].offset().x, split[1].offset().x]
+    });
+    assert_eq!(offsets, [px(0.); 2]);
+}
+
+#[gpui::test]
+fn width_candidates_stay_on_their_side(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let original = "short\n";
+    let modified = format!("{}\n", "y".repeat(400));
+    let files = [fixture::modified("sides.txt", original, &modified)];
+    let [original_side, modified_side] = super::width_candidates(&files, 8);
+    assert!(
+        original_side
+            .iter()
+            .all(|line| line.len() < 40 && !line.contains('y')),
+        "the deleted side must not carry the modified side's lines"
+    );
+    assert!(modified_side.iter().any(|line| line.len() >= 400));
+}
