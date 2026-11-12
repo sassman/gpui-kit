@@ -220,3 +220,38 @@ fn width_candidates_stay_on_their_side(cx: &mut TestAppContext) {
     );
     assert!(modified_side.iter().any(|line| line.len() >= 400));
 }
+
+#[test]
+fn pinned_file_follows_the_viewport_top() {
+    use gpui::ListOffset;
+
+    use super::state::DisplayRow;
+    let code = |file| DisplayRow::Code {
+        file,
+        original: Some(0),
+        modified: Some(0),
+        changed: false,
+    };
+    let rows = [
+        DisplayRow::File(0),
+        code(0),
+        code(0),
+        DisplayRow::File(1),
+        code(1),
+    ];
+    let headers = [0, 3];
+    let at = |item_ix, offset: f32| ListOffset {
+        item_ix,
+        offset_in_item: px(offset),
+    };
+    // The list at rest shows file 0's own header row; nothing is pinned.
+    assert_eq!(super::pinned_file(&rows, &headers, at(0, 0.)), None);
+    // Any scroll into the file carries its header out; the pin takes over.
+    assert_eq!(super::pinned_file(&rows, &headers, at(0, 4.)), Some(0));
+    assert_eq!(super::pinned_file(&rows, &headers, at(2, 0.)), Some(0));
+    // The moment the next header reaches the top it stands inline, unpinned.
+    assert_eq!(super::pinned_file(&rows, &headers, at(3, 0.)), None);
+    assert_eq!(super::pinned_file(&rows, &headers, at(3, 2.)), Some(1));
+    // A stale offset past the rows pins nothing.
+    assert_eq!(super::pinned_file(&rows, &headers, at(9, 0.)), None);
+}

@@ -21,11 +21,11 @@ pub use state::{DiffEvent, DiffFold, DiffState};
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, Axis, ClickEvent, ClipboardItem, Context, ElementId, Entity, Focusable as _,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, Length, ListOffset,
-    MouseButton, ParentElement as _, Pixels, RenderOnce, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun, Window, div, list,
-    prelude::FluentBuilder as _, px, relative,
+    AnyElement, App, Axis, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
+    Focusable as _, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, Length,
+    ListOffset, ListState, MouseButton, ParentElement as _, Pixels, RenderOnce, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun,
+    Window, div, list, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::TestSupportExt as _;
 use rust_i18n::t;
@@ -628,6 +628,30 @@ fn render_diff(
     let horizontal = state.horizontal_scroll().clone();
     let split = state.split_scroll().clone();
     let has_rows = !rows.is_empty();
+    // The list width; the pinned header's clip box must span the same strip.
+    let strip_width: Length = if panel_split {
+        relative(1.).into()
+    } else {
+        content_width.into()
+    };
+    // The header of the file whose content meets the viewport top stays
+    // pinned over the list, so a long file keeps its name and controls in
+    // view; the next file's header pushes it out.
+    let pinned = (props.header_visible && has_rows)
+        .then(|| {
+            pinned_file(
+                rows.as_slice(),
+                state.header_rows(),
+                scrollbar.logical_scroll_top(),
+            )
+        })
+        .flatten()
+        .map(|file| {
+            let next_header = state.header_rows().get(file + 1).copied();
+            let slide = pinned_slide(next_header, &scrollbar);
+            let placement = HeaderPlacement::resolve(state, code.files[file].path());
+            render_pinned_header(file, strip_width, slide, placement, &code, window, cx)
+        });
     let label = match state.files() {
         [file] => t!("Diff.Viewer", name = file.path().as_str()).to_string(),
         files => t!("Diff.ViewerFiles", count = files.len()).to_string(),
@@ -664,6 +688,7 @@ fn render_diff(
                     })
                     .h_full(),
                 ))
+                .children(pinned)
                 .into_any_element(),
             scrollbar.clone(),
             horizontal.clone(),
@@ -1309,10 +1334,98 @@ fn render_file_header(
             .children(file_annotations(file, code, window, cx))
             .into_any_element();
     }
+    let placement = HeaderPlacement::resolve(code.state.read(cx), code.files[file].path());
+    file_header_bar(file, code, placement, window, cx)
+        .children(file_annotations(file, code, window, cx))
+        .into_any_element()
+}
+
+/// What the header bar reads from the diff state, resolved by the caller: the
+/// bar renders both inside the list, where the state entity is readable, and
+/// inside the state's own render pass, where reading the entity would panic.
+#[derive(Clone, Copy)]
+struct HeaderPlacement {
+    /// Cancels the horizontal strip's offset so the bar stays in the viewport.
+    pin: Pixels,
+    viewport: Pixels,
+    collapsed: bool,
+}
+
+impl HeaderPlacement {
+    fn resolve(state: &DiffState, path: &str) -> Self {
+        Self {
+            pin: -state.horizontal_scroll().offset().x,
+            viewport: state.viewport().width,
+            collapsed: state.is_file_collapsed(path),
+        }
+    }
+}
+
+/// The file whose header is pinned over the viewport: the owner of the row at
+/// the viewport top, once its own header row has scrolled out above it.
+fn pinned_file(rows: &[DisplayRow], header_rows: &[usize], top: ListOffset) -> Option<usize> {
+    let file = rows.get(top.item_ix)?.file();
+    let header_ix = *header_rows.get(file)?;
+    (top.item_ix > header_ix || top.offset_in_item > px(0.)).then_some(file)
+}
+
+/// How far the next file's header has pushed the pinned bar up and out. The
+/// next header's row height stands in for the pinned bar's; until that row
+/// is measured the pinned bar swaps without the slide.
+fn pinned_slide(next_header: Option<usize>, list: &ListState) -> Pixels {
+    let Some(bounds) = next_header.and_then(|ix| list.bounds_for_item(ix)) else {
+        return px(0.);
+    };
+    let gap = bounds.top() - list.viewport_bounds().top();
+    if gap < bounds.size.height {
+        gap - bounds.size.height
+    } else {
+        px(0.)
+    }
+}
+
+/// The pinned copy of `file`'s header bar, without the file's annotation
+/// cards.
+fn render_pinned_header(
+    file: usize,
+    strip_width: Length,
+    slide: Pixels,
+    placement: HeaderPlacement,
+    code: &Rc<CodePresentation>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    // The clip box spans the strip and hides the part the slide pushes above
+    // the viewport; without it the bar would paint over whatever sits there.
+    div()
+        .id(("diff-pinned-header", file))
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(strip_width)
+        .overflow_hidden()
+        .child(
+            file_header_bar(file, code, placement, window, cx)
+                .mt(slide)
+                .bg(cx.theme().background),
+        )
+        .into_any_element()
+}
+
+/// The header strip shared between a file's header row and its pinned copy;
+/// the row appends the file's annotation cards, the pinned copy must not
+/// repeat them.
+fn file_header_bar(
+    file: usize,
+    code: &CodePresentation,
+    placement: HeaderPlacement,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
     let document = &code.files[file];
     let foreground = cx.theme().muted_foreground;
     let border = cx.theme().border;
-    let collapsed = code.state.read(cx).is_file_collapsed(document.path());
+    let collapsed = placement.collapsed;
     let content = if let Some(render) = &code.header.content {
         render(document, window, cx)
     } else {
@@ -1374,9 +1487,8 @@ fn render_file_header(
     // and the file's cards must never leave the viewport: they take the
     // viewport's width and cancel the strip's offset. Before the first
     // paint the viewport is unknown; the row's own width stands in.
-    let scrolled = code.state.read(cx);
-    let pin = -scrolled.horizontal_scroll().offset().x;
-    let viewport = scrolled.viewport().width;
+    let pin = placement.pin;
+    let viewport = placement.viewport;
     v_flex()
         .id("file-header")
         .map(|this| {
@@ -1420,8 +1532,6 @@ fn render_file_header(
                 )
                 .child(div().flex_1().min_w_0().child(content)),
         )
-        .children(file_annotations(file, code, window, cx))
-        .into_any_element()
 }
 
 fn file_annotations(

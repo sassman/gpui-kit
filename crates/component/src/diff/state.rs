@@ -406,6 +406,21 @@ impl DiffState {
             cx,
         );
         let files = files.into_iter().collect::<Vec<_>>();
+        // A wheel scroll moves the list without re-rendering the owner, but
+        // the pinned file header is placed from the scroll position at render
+        // time. Nudge observers once the wheel delta has been applied; the
+        // deferral also waits out the list's internal borrow. Every other
+        // scroll path (scrollbar, keyboard, scroll_to) notifies already.
+        let list = ListState::new(0, ListAlignment::Top, px(0.));
+        list.set_scroll_handler({
+            let weak = cx.entity().downgrade();
+            move |_, _, cx| {
+                let weak = weak.clone();
+                cx.defer(move |cx| {
+                    let _ = weak.update(cx, |_, cx| cx.notify());
+                });
+            }
+        });
         let mut state = Self {
             expanded: vec![Vec::new(); files.len()],
             presentations: vec![None; files.len()],
@@ -423,7 +438,7 @@ impl DiffState {
             header_rows: Vec::new(),
             rows: Rc::default(),
             change_rows: Vec::new(),
-            list: ListState::new(0, ListAlignment::Top, px(0.)),
+            list,
             horizontal_scroll: ScrollHandle::new(),
             split_scroll: [ScrollHandle::new(), ScrollHandle::new()],
             focus,
@@ -640,6 +655,10 @@ impl DiffState {
 
     pub(crate) fn rows(&self) -> &Rc<Vec<DisplayRow>> {
         &self.rows
+    }
+    /// Each file's header row index in [`Self::rows`].
+    pub(crate) fn header_rows(&self) -> &[usize] {
+        &self.header_rows
     }
     pub(crate) fn list(&self) -> &ListState {
         &self.list
