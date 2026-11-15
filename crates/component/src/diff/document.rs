@@ -124,6 +124,23 @@ impl DiffLineRange {
     pub(crate) fn is_single_side(&self) -> bool {
         self.side == self.end_side
     }
+
+    /// Whether `position` lies within the range, cross-side ranges covering
+    /// their start side from `start` on and their end side up to `end`.
+    pub(crate) fn contains(&self, position: &DiffLinePosition) -> bool {
+        if position.path() != &self.path {
+            return false;
+        }
+        let (side, line) = (position.side(), position.line());
+        if self.is_single_side() {
+            side == self.side
+                && (self.start.min(self.end)..=self.start.max(self.end)).contains(&line)
+        } else if side == self.side {
+            line >= self.start
+        } else {
+            line <= self.end
+        }
+    }
 }
 
 /// One supplied source line and its display form.

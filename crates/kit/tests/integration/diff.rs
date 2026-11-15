@@ -742,6 +742,57 @@ fn wheel_axes_stay_independent_when_code_overflows_in_both_directions(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn change_keys_mark_the_reached_group_and_step_from_a_visible_mark(cx: &mut TestAppContext) {
+    let patch: String = (0..40)
+        .map(|ix| {
+            let line = ix * 20 + 1;
+            format!("@@ -{line},1 +{line},1 @@\n-old {ix}\n+new {ix}\n")
+        })
+        .collect();
+    let (handle, state) = review(cx, &patch, None, DiffMode::Unified, vec![]);
+    let focused_start = |state: &Entity<DiffState>, cx: &mut App| {
+        state
+            .read(cx)
+            .focused_ranges()
+            .first()
+            .map(|range| range.start())
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        state.update(cx, |state, cx| state.next_change(cx));
+        window.render_frame(cx);
+        // The reached group carries the mark, one range per side, and both of
+        // its rows render the marker element.
+        let ranges = state.read(cx).focused_ranges().to_vec();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].start(), ranges[0].end()), (1, 1));
+        assert_eq!(window.find_all("nav-focus").len(), 2);
+
+        // The mark is on screen, so the key steps off it to its neighbour.
+        state.update(cx, |state, cx| state.next_change(cx));
+        window.render_frame(cx);
+        assert_eq!(focused_start(&state, cx), Some(21));
+
+        // Scrolled elsewhere, the walk abandons the mark and re-anchors at
+        // the viewport: the first group on the new page, not the third one.
+        state.update(cx, |state, cx| {
+            let position = DiffLinePosition::new("review.txt", DiffSide::Original, 401);
+            state.scroll_to_line(position, cx)
+        });
+        window.render_frame(cx);
+        state.update(cx, |state, cx| state.next_change(cx));
+        window.render_frame(cx);
+        assert_eq!(focused_start(&state, cx), Some(401));
+
+        // And from there the mark steps again.
+        state.update(cx, |state, cx| state.next_change(cx));
+        window.render_frame(cx);
+        assert_eq!(focused_start(&state, cx), Some(421));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn next_change_wraps_once_the_list_is_scrolled_to_its_end(cx: &mut TestAppContext) {
     let patch: String = (0..40)
         .map(|ix| {

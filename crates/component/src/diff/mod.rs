@@ -629,6 +629,7 @@ fn render_diff(
         split_code_widths: state.split_code_widths(),
         selection: state.selection().clone(),
         selected_lines: state.selected_lines(),
+        focused: state.focused_ranges().to_vec(),
         selected: state.selected_span(),
         geometry: state.geometry().clone(),
         folds: state.folds().to_vec(),
@@ -949,6 +950,7 @@ struct CodePresentation {
     on_line_hover: Option<HoverHandler>,
     selection: gpui_base::TextSelectionHandle,
     selected_lines: Option<DiffLineRange>,
+    focused: Vec<DiffLineRange>,
     selected: Option<SelectedLines>,
     geometry: Rc<std::cell::RefCell<selection::SelectionGeometry>>,
     folds: Vec<DiffFold>,
@@ -2057,6 +2059,10 @@ fn code_line(
                 .background()
                 .unwrap_or_else(|| cx.theme().warning.opacity(0.2))
         });
+    let focused = code
+        .focused
+        .iter()
+        .any(|range| positions.iter().any(|position| range.contains(position)));
     let marker_lane = code.gutter_marker_content.clone().map(|render| {
         let marker = positions
             .iter()
@@ -2098,6 +2104,27 @@ fn code_line(
         // An overlay, so the change background shows through a translucent fill.
         .when_some(decoration, |this, background| {
             this.child(div().absolute().inset_0().bg(background))
+        })
+        // The focus marker: a slim edge bar and a wash faint enough to keep
+        // the change fills readable, so the eye finds where navigation landed.
+        .when(focused, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().primary.opacity(0.06)),
+            )
+            .child(
+                div()
+                    .id("nav-focus")
+                    .test_support()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .bg(cx.theme().primary.opacity(0.7)),
+            )
         })
         .when(selected, |this| this.bg(cx.theme().selection))
         .when(hover_line && !selected, |this| {

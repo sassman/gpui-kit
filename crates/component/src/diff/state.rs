@@ -295,6 +295,7 @@ pub struct DiffState {
     selection: TextSelectionHandle,
     geometry: Rc<RefCell<SelectionGeometry>>,
     selected_lines: Option<DiffLineRange>,
+    focused: Vec<DiffLineRange>,
     selection_anchor: Option<DiffLinePosition>,
     selection_cursor: Option<DiffLinePosition>,
     selecting: bool,
@@ -445,6 +446,7 @@ impl DiffState {
             selection,
             geometry,
             selected_lines: None,
+            focused: Vec::new(),
             selection_anchor: None,
             selection_cursor: None,
             selecting: false,
@@ -747,6 +749,7 @@ impl DiffState {
         self.collapsed
             .retain(|path| self.file_ixs.contains_key(path));
         // Folds point into one revision's lines; a new patch starts clean.
+        self.focused.clear();
         self.folds.clear();
         self.revealed_folds.clear();
         self.resolutions.clear();
@@ -1097,14 +1100,48 @@ impl DiffState {
         cx.notify();
     }
 
-    /// Moves to the next changed group after the current viewport, across files,
-    /// wrapping to the first once the list is scrolled to its end.
+    /// Moves to the next changed group, across files, wrapping to the first
+    /// past the last. A visible [`focused_ranges`](Self::focused_ranges) mark
+    /// is the step's anchor; otherwise the walk re-anchors at the viewport.
     pub fn next_change(&mut self, cx: &mut Context<Self>) {
         self.move_change(true, cx);
     }
-    /// Moves to the previous changed group before the current viewport, across files.
+    /// Moves to the previous changed group, anchored like
+    /// [`next_change`](Self::next_change).
     pub fn previous_change(&mut self, cx: &mut Context<Self>) {
         self.move_change(false, cx);
+    }
+
+    /// The lines the last navigation landed on; their rows carry the focus
+    /// marker. Change keys set them to the reached group, one range per side,
+    /// and the application sets them for its own jumps, such as to a comment.
+    pub fn focused_ranges(&self) -> &[DiffLineRange] {
+        &self.focused
+    }
+
+    /// Marks `ranges` with the focus marker, or clears it with an empty set.
+    /// A range matching no displayed line is silently invisible.
+    pub fn set_focused_ranges(
+        &mut self,
+        ranges: impl IntoIterator<Item = DiffLineRange>,
+        cx: &mut Context<Self>,
+    ) {
+        let ranges: Vec<DiffLineRange> = ranges.into_iter().collect();
+        if self.focused != ranges {
+            self.focused = ranges;
+            cx.notify();
+        }
+    }
+
+    /// The source line shown by the row at the top of the viewport.
+    pub fn top_line(&self) -> Option<DiffLinePosition> {
+        self.row_position(self.list.logical_scroll_top().item_ix)
+    }
+
+    /// Whether the row showing `position` is laid out inside the viewport.
+    pub fn is_line_visible(&self, position: &DiffLinePosition) -> bool {
+        self.source_row(position)
+            .is_some_and(|row| self.row_is_visible(row))
     }
 
     /// Reveals part or all of a collapsed unchanged range.
@@ -1478,37 +1515,110 @@ impl DiffState {
     fn move_change(&mut self, forward: bool, cx: &mut Context<Self>) {
         let top = self.list.logical_scroll_top().item_ix;
         let groups = &self.change_rows;
+        // A visible focus steps to its neighbour. One scrolled off the page is
+        // abandoned and the walk re-anchors at the viewport, so after paging
+        // away the key guides within the page the reader is looking at.
+        let anchor = self
+            .focused
+            .first()
+            .and_then(|range| self.source_row(&range.start_position()))
+            .filter(|&row| self.row_is_visible(row));
         let target = if forward {
-            // Scrolled to the end, the list clamps any later change below the
-            // top, so the top never passes it and the key would stop there.
-            // The last row's bounds answer even when the rows above the
-            // viewport were never measured, as after a jump to the end.
-            let at_end = self
-                .list
-                .item_count()
-                .checked_sub(1)
-                .and_then(|last| self.list.bounds_for_item(last))
-                .is_some_and(|last| last.bottom() <= self.list.viewport_bounds().bottom());
-            groups
-                .get(groups.partition_point(|ix| *ix <= top))
-                .copied()
-                .filter(|_| !at_end)
-                .or(groups.first().copied())
+            match anchor {
+                Some(row) => groups
+                    .get(groups.partition_point(|ix| *ix <= row))
+                    .copied()
+                    .or(groups.first().copied()),
+                None => {
+                    // Scrolled to the end, the list clamps any later change
+                    // below the top, so the top never passes it and the key
+                    // would stop there. The last row's bounds answer even when
+                    // the rows above the viewport were never measured, as
+                    // after a jump to the end.
+                    let at_end = self
+                        .list
+                        .item_count()
+                        .checked_sub(1)
+                        .and_then(|last| self.list.bounds_for_item(last))
+                        .is_some_and(|last| last.bottom() <= self.list.viewport_bounds().bottom());
+                    groups
+                        .get(groups.partition_point(|ix| *ix <= top))
+                        .copied()
+                        .filter(|_| !at_end)
+                        .or(groups.first().copied())
+                }
+            }
         } else {
-            groups
-                .partition_point(|ix| *ix < top)
-                .checked_sub(1)
-                .and_then(|ix| groups.get(ix))
-                .copied()
-                .or(groups.last().copied())
+            let before = |row| {
+                groups
+                    .partition_point(|ix| *ix < row)
+                    .checked_sub(1)
+                    .and_then(|ix| groups.get(ix))
+                    .copied()
+            };
+            before(anchor.unwrap_or(top)).or(groups.last().copied())
         };
         if let Some(ix) = target {
+            self.focused = self.group_ranges(ix);
             self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
+            // The pinned header would cover the reached row at the viewport
+            // top, hiding exactly the lines the key points at.
+            if let Some(position) = self.row_position(ix) {
+                self.clear_pinned_header(&position);
+            }
             cx.notify();
         }
+    }
+
+    /// The source lines of the changed group starting at row `start`, one
+    /// single-side range per side the group touches. Two spans rather than a
+    /// cross-side range: that form reads as "start side onwards", which would
+    /// smear the marker far past the group.
+    fn group_ranges(&self, start: usize) -> Vec<DiffLineRange> {
+        let Some(&DisplayRow::Code { file, .. }) = self.rows.get(start) else {
+            return Vec::new();
+        };
+        let document = &self.files[file];
+        let mut spans: [Option<(usize, usize)>; 2] = [None, None];
+        for row in self.rows[start..].iter().take_while(|row| {
+            matches!(row, DisplayRow::Code { changed: true, file: in_file, .. } if *in_file == file)
+        }) {
+            let DisplayRow::Code {
+                original, modified, ..
+            } = row
+            else {
+                continue;
+            };
+            let [span_original, span_modified] = &mut spans;
+            for (span, side, index) in [
+                (span_original, DiffSide::Original, original),
+                (span_modified, DiffSide::Modified, modified),
+            ] {
+                if let Some(index) = index {
+                    let line = document.line_number(side, *index);
+                    let (low, high) = span.get_or_insert((line, line));
+                    *low = (*low).min(line);
+                    *high = (*high).max(line);
+                }
+            }
+        }
+        [DiffSide::Original, DiffSide::Modified]
+            .into_iter()
+            .zip(spans)
+            .filter_map(|(side, span)| {
+                span.map(|(low, high)| DiffLineRange::new(document.path().clone(), side, low, high))
+            })
+            .collect()
+    }
+
+    fn row_is_visible(&self, row: usize) -> bool {
+        self.list.bounds_for_item(row).is_some_and(|bounds| {
+            let viewport = self.list.viewport_bounds();
+            bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom()
+        })
     }
 
     /// The source line shown by a row, looking past headers within its file.
