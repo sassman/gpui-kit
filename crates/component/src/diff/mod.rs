@@ -1597,6 +1597,7 @@ fn render_gutter(
     file: usize,
     side: DiffSide,
     ix: Option<usize>,
+    focused: bool,
     code: &CodePresentation,
     cx: &App,
 ) -> AnyElement {
@@ -1616,6 +1617,9 @@ fn render_gutter(
         .when(hover, |this| {
             this.hover(|this| this.bg(cx.theme().list_hover))
         })
+        // On top of the row wash, so the marked rows' numbers read as the
+        // anchor of the focus marker without washing the code itself.
+        .when(focused, |this| this.bg(cx.theme().primary.opacity(0.12)))
         .when_some(ix, |this, ix| {
             let position = code.position(file, side, ix);
             let down = code.state.clone();
@@ -2105,14 +2109,15 @@ fn code_line(
         .when_some(decoration, |this, background| {
             this.child(div().absolute().inset_0().bg(background))
         })
-        // The focus marker: a slim edge bar and a wash faint enough to keep
-        // the change fills readable, so the eye finds where navigation landed.
+        // The focus marker: an edge bar and a translucent wash, with a denser
+        // gutter tint as the anchor. Loud enough to catch the eye at a glance,
+        // translucent so the change fills and the code stay readable.
         .when(focused, |this| {
             this.child(
                 div()
                     .absolute()
                     .inset_0()
-                    .bg(cx.theme().primary.opacity(0.06)),
+                    .bg(cx.theme().primary.opacity(0.14)),
             )
             .child(
                 div()
@@ -2122,8 +2127,8 @@ fn code_line(
                     .left_0()
                     .top_0()
                     .bottom_0()
-                    .w(px(2.))
-                    .bg(cx.theme().primary.opacity(0.7)),
+                    .w(px(3.))
+                    .bg(cx.theme().primary.opacity(0.9)),
             )
         })
         .when(selected, |this| this.bg(cx.theme().selection))
@@ -2141,7 +2146,7 @@ fn code_line(
                 gutters
                     .into_iter()
                     .flatten()
-                    .map(|(side, ix)| render_gutter(file, side, ix, &code, cx)),
+                    .map(|(side, ix)| render_gutter(file, side, ix, focused, &code, cx)),
             )
         })
         .children(marker_lane)
