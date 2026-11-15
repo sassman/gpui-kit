@@ -12,9 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::test::{TestSupportExt as _, TestWindowExt as _};
 use gpui_kit::{
-    App, AppContext, Context, ElementId, Entity, Focusable as _, InputEvent as _, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollDelta,
-    TestAppContext, Window, WindowHandle, div, point, prelude::*, px, size,
+    App, AppContext, Context, Entity, Focusable as _, InputEvent as _, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Role, ScrollDelta, TestAppContext,
+    Window, WindowHandle, div, point, prelude::*, px, size,
 };
 
 struct Review {
@@ -817,7 +817,7 @@ fn change_keys_mark_the_reached_group_and_step_from_a_visible_mark(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn next_change_wraps_once_the_list_is_scrolled_to_its_end(cx: &mut TestAppContext) {
+fn change_keys_stop_at_the_ends_instead_of_wrapping(cx: &mut TestAppContext) {
     let patch: String = (0..40)
         .map(|ix| {
             let line = ix * 20 + 1;
@@ -825,35 +825,40 @@ fn next_change_wraps_once_the_list_is_scrolled_to_its_end(cx: &mut TestAppContex
         })
         .collect();
     let (handle, state) = review(cx, &patch, None, DiffMode::Unified, vec![]);
-    let first_drawn = |window: &Window| {
-        let row = ElementId::from(("new", 0usize));
-        window
-            .find_all("source")
-            .iter()
-            .any(|source| source.path().contains(&row))
+    let focused_start = |state: &Entity<DiffState>, cx: &mut App| {
+        state
+            .read(cx)
+            .focused_ranges()
+            .first()
+            .map(|range| range.start())
     };
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        // Previous change from the top jumps to the end, past rows no frame
-        // has measured yet.
+        // Previous from the top has nothing above the viewport; the walk
+        // clamps to the first group rather than jumping to the end.
         state.update(cx, |state, cx| state.previous_change(cx));
         window.render_frame(cx);
-        assert!(!first_drawn(window));
-        state.update(cx, |state, cx| state.next_change(cx));
-        window.render_frame(cx);
-        assert!(first_drawn(window), "next change stopped after a jump");
+        assert_eq!(focused_start(&state, cx), Some(1));
 
-        // At the end, the last changes sit below the top where the list cannot
-        // scroll them up to it.
-        let mut left_the_first = false;
-        let wrapped = (0..80).any(|_| {
+        // At the first group the key has no previous neighbour and stays.
+        state.update(cx, |state, cx| state.previous_change(cx));
+        window.render_frame(cx);
+        assert_eq!(focused_start(&state, cx), Some(1));
+
+        // Near the end the next key reaches the last group and then stays;
+        // it never passes it, so a surplus of presses cannot wrap.
+        state.update(cx, |state, cx| {
+            let position = DiffLinePosition::new("review.txt", DiffSide::Original, 781);
+            state.scroll_to_line(position, cx)
+        });
+        window.render_frame(cx);
+        // Far more presses than groups below the viewport: with wrapping
+        // they would overshoot back into the document.
+        for _ in 0..40 {
             state.update(cx, |state, cx| state.next_change(cx));
             window.render_frame(cx);
-            let first = first_drawn(window);
-            left_the_first |= !first;
-            left_the_first && first
-        });
-        assert!(wrapped, "next change stopped at the end");
+        }
+        assert_eq!(focused_start(&state, cx), Some(781));
     })
     .unwrap();
 }

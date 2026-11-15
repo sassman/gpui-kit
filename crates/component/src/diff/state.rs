@@ -1084,8 +1084,8 @@ impl DiffState {
         cx.notify();
     }
 
-    /// Moves to the next changed group, across files, wrapping to the first
-    /// past the last. A visible [`focused_ranges`](Self::focused_ranges) mark
+    /// Moves to the next changed group, across files, stopping at the last
+    /// one. A visible [`focused_ranges`](Self::focused_ranges) mark
     /// is the step's anchor; otherwise the walk re-anchors at the viewport.
     pub fn next_change(&mut self, cx: &mut Context<Self>) {
         self.move_change(true, cx);
@@ -1507,30 +1507,14 @@ impl DiffState {
             .first()
             .and_then(|range| self.source_row(&range.start_position()))
             .filter(|&row| self.row_is_visible(row));
+        // No wrapping: a step off the terminal group goes nowhere and the
+        // mark stays put, while a re-anchored walk that finds no group on
+        // its side of the viewport clamps to the terminal one.
         let target = if forward {
+            let after = |row| groups.get(groups.partition_point(|ix| *ix <= row)).copied();
             match anchor {
-                Some(row) => groups
-                    .get(groups.partition_point(|ix| *ix <= row))
-                    .copied()
-                    .or(groups.first().copied()),
-                None => {
-                    // Scrolled to the end, the list clamps any later change
-                    // below the top, so the top never passes it and the key
-                    // would stop there. The last row's bounds answer even when
-                    // the rows above the viewport were never measured, as
-                    // after a jump to the end.
-                    let at_end = self
-                        .list
-                        .item_count()
-                        .checked_sub(1)
-                        .and_then(|last| self.list.bounds_for_item(last))
-                        .is_some_and(|last| last.bottom() <= self.list.viewport_bounds().bottom());
-                    groups
-                        .get(groups.partition_point(|ix| *ix <= top))
-                        .copied()
-                        .filter(|_| !at_end)
-                        .or(groups.first().copied())
-                }
+                Some(row) => after(row),
+                None => after(top).or(groups.last().copied()),
             }
         } else {
             let before = |row| {
@@ -1540,7 +1524,10 @@ impl DiffState {
                     .and_then(|ix| groups.get(ix))
                     .copied()
             };
-            before(anchor.unwrap_or(top)).or(groups.last().copied())
+            match anchor {
+                Some(row) => before(row),
+                None => before(top).or(groups.first().copied()),
+            }
         };
         if let Some(ix) = target {
             self.focused = self.group_ranges(ix);
