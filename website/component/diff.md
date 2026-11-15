@@ -226,9 +226,9 @@ self.diff.update(cx, |state, cx| {
 `scroll_to_line` reveals supplied context and expands a collapsed file when
 needed; it cannot reveal lines absent from the patch. `scroll_to_file` shows a
 file's header, including a file without source rows, for example from a file
-list. Change navigation moves between changed groups across all files and wraps
-at the ends. Put display mode and navigation commands in the application's
-toolbar or menu.
+list. Change navigation moves between changed groups across all files and
+stops at the ends. Put display mode and navigation commands in the
+application's toolbar or menu.
 
 Each file header has a collapse control. `set_file_collapsed(path, collapsed, cx)`
 and `is_file_collapsed(path)` drive it from the application, for example to
