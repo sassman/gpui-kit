@@ -84,27 +84,31 @@ fn the_wheel_scrolls_past_the_rows_rendered_so_far(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_revealed_line_lands_below_the_pinned_header(cx: &mut TestAppContext) {
+fn a_revealed_line_lands_in_the_middle_of_the_viewport(cx: &mut TestAppContext) {
     let (state, cx) = long_patch(cx);
     let position = DiffLinePosition::new("long.txt", DiffSide::Modified, 150);
     state.update(cx, |state, cx| state.scroll_to_line(position.clone(), cx));
     for _ in 0..3 {
         draw(cx);
     }
-    let (gap, row_height) = cx.update(|_, cx| {
+    let (gap, viewport, row_height) = cx.update(|_, cx| {
         let state = state.read(cx);
         let row = state.source_row(&position).expect("line has a row");
         let list = state.list();
         let bounds = list.bounds_for_item(row).expect("target row is rendered");
         (
             bounds.top() - list.viewport_bounds().top(),
+            list.viewport_bounds().size.height,
             bounds.size.height,
         )
     });
-    // Flush to the top the line would sit under the pinned header overlay.
+    // Centered, the line reads in place instead of hiding under the pinned
+    // header overlay or hugging the top edge.
+    // Rows measure at fractional heights, so the landing drifts a trifle.
+    let expected = (viewport - row_height) / 2.;
     assert!(
-        gap >= row_height,
-        "line {gap:?} below the viewport top, rows {row_height:?} tall"
+        (gap - expected).abs() <= px(2.),
+        "line {gap:?} below the viewport top, middle at {expected:?}"
     );
 }
 

@@ -775,7 +775,8 @@ fn change_keys_mark_the_reached_group_and_step_from_a_visible_mark(cx: &mut Test
         assert_eq!(focused_start(&state, cx), Some(21));
 
         // Scrolled elsewhere, the walk abandons the mark and re-anchors at
-        // the viewport: the first group on the new page, not the third one.
+        // the viewport: a group on the page the reader is looking at, not
+        // the stale mark's neighbour.
         state.update(cx, |state, cx| {
             let position = DiffLinePosition::new("review.txt", DiffSide::Original, 401);
             state.scroll_to_line(position, cx)
@@ -783,12 +784,34 @@ fn change_keys_mark_the_reached_group_and_step_from_a_visible_mark(cx: &mut Test
         window.render_frame(cx);
         state.update(cx, |state, cx| state.next_change(cx));
         window.render_frame(cx);
-        assert_eq!(focused_start(&state, cx), Some(401));
+        let landed = focused_start(&state, cx).expect("the walk re-anchored");
+        assert_ne!(landed, 41, "stepped from the stale mark");
+        let marked = DiffLinePosition::new("review.txt", DiffSide::Original, landed);
+        assert!(
+            state.read(cx).is_line_visible(&marked),
+            "landed off the page at line {landed}"
+        );
 
         // And from there the mark steps again.
         state.update(cx, |state, cx| state.next_change(cx));
         window.render_frame(cx);
-        assert_eq!(focused_start(&state, cx), Some(421));
+        assert_eq!(focused_start(&state, cx), Some(landed + 20));
+
+        // Away from the document's ends, the marked group lands in the middle
+        // of the viewport, not at its top under the pinned header.
+        let bars = window.find_all("nav-focus");
+        assert_eq!(bars.len(), 2);
+        let group_top = bars[0].bounds().top().min(bars[1].bounds().top());
+        let group_bottom = bars[0].bounds().bottom().max(bars[1].bounds().bottom());
+        let viewport_top = window.find("before-diff").bounds().bottom();
+        let viewport_bottom = window.find("review").bounds().bottom();
+        let above = group_top - viewport_top;
+        let below = viewport_bottom - group_bottom;
+        let row_height = bars[0].bounds().size.height;
+        assert!(
+            (above - below).abs() <= row_height,
+            "group {above:?} from the top and {below:?} from the bottom"
+        );
     })
     .unwrap();
 }

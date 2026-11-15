@@ -1006,8 +1006,9 @@ impl DiffState {
     }
 
     /// Reveals and scrolls to a source line, expanding its file and hidden
-    /// context if needed. The line lands below the pinned file header, not
-    /// under it.
+    /// context if needed. The line lands in the middle of the viewport, clear
+    /// of the pinned file header; near the document's ends it lands as close
+    /// to the middle as the list can scroll.
     pub fn scroll_to_line(&mut self, position: DiffLinePosition, cx: &mut Context<Self>) {
         if self.line_index(&position).is_none() {
             return;
@@ -1016,8 +1017,9 @@ impl DiffState {
             self.rebuild_at_anchor();
         }
         if self.expand_line(&position).is_some() {
-            self.reveal_line(&position);
-            self.clear_pinned_header(&position);
+            if let Some(row) = self.source_row(&position) {
+                self.center_block(row, 1);
+            }
             cx.notify();
         }
     }
@@ -1029,21 +1031,42 @@ impl DiffState {
         self.line_index(position).is_some()
     }
 
-    /// Scrolls up by the pinned header bar's height, so a line revealed at
-    /// the viewport top is readable rather than covered by the overlay. The
-    /// file's header row gives the bar's height when it was rendered;
-    /// otherwise two code rows stand in, over-clearing a little rather than
-    /// leaving the line hidden. [`reveal_line`](Self::reveal_line) stays
+    /// Scrolls the block of `rows` display rows starting at `start` to the
+    /// middle of the viewport, where the eye finds a landing without hunting
+    /// the top edge. A block taller than the viewport, or one scrolled before
+    /// the first layout, lands with its start a pinned header's height below
+    /// the top instead, so the header overlay never covers it. The list clamps
+    /// at the document's ends, so near them the block lands as close to the
+    /// middle as the ends allow. [`reveal_line`](Self::reveal_line) stays
     /// exact for anchor restoration, which must not drift per rebuild.
-    fn clear_pinned_header(&self, position: &DiffLinePosition) {
-        let measured = self
-            .file_ix(position.path())
-            .and_then(|file| self.header_rows.get(file))
-            .and_then(|&ix| self.list.bounds_for_item(ix))
-            .map(|bounds| bounds.size.height);
-        if let Some(clearance) = measured.or_else(|| self.row_height.map(|height| height * 2.)) {
-            self.list.scroll_by(-clearance);
+    fn center_block(&self, start: usize, rows: usize) {
+        self.list.scroll_to(ListOffset {
+            item_ix: start,
+            offset_in_item: px(0.),
+        });
+        let clearance = self
+            .rows
+            .get(start)
+            .map(|row| self.pinned_clearance(row.file()))
+            .unwrap_or_default();
+        let block = self.row_height.unwrap_or_default() * rows as f32;
+        let viewport = self.list.viewport_bounds().size.height;
+        let lead = ((viewport - block) / 2.).max(clearance);
+        if lead > px(0.) {
+            self.list.scroll_by(-lead);
         }
+    }
+
+    /// The height of the pinned header bar over `file`'s rows: the measured
+    /// header row, or two code rows when it was never rendered, over-clearing
+    /// a little rather than leaving lines hidden.
+    fn pinned_clearance(&self, file: usize) -> Pixels {
+        self.header_rows
+            .get(file)
+            .and_then(|&ix| self.list.bounds_for_item(ix))
+            .map(|bounds| bounds.size.height)
+            .or_else(|| self.row_height.map(|height| height * 2.))
+            .unwrap_or_default()
     }
 
     /// Scrolls to the header of the file at `path`, a [`DiffFile::path`].
@@ -1521,17 +1544,22 @@ impl DiffState {
         };
         if let Some(ix) = target {
             self.focused = self.group_ranges(ix);
-            self.list.scroll_to(ListOffset {
-                item_ix: ix,
-                offset_in_item: px(0.),
-            });
-            // The pinned header would cover the reached row at the viewport
-            // top, hiding exactly the lines the key points at.
-            if let Some(position) = self.row_position(ix) {
-                self.clear_pinned_header(&position);
-            }
+            self.center_block(ix, self.group_rows(ix).count());
             cx.notify();
         }
+    }
+
+    /// The display rows of the changed group starting at `start`.
+    fn group_rows(&self, start: usize) -> impl Iterator<Item = &DisplayRow> {
+        let group_file = match self.rows.get(start) {
+            Some(&DisplayRow::Code { file, .. }) => Some(file),
+            _ => None,
+        };
+        self.rows[start..].iter().take_while(move |row| {
+            group_file.is_some_and(
+                |group| matches!(row, DisplayRow::Code { changed: true, file, .. } if *file == group),
+            )
+        })
     }
 
     /// The source lines of the changed group starting at row `start`, one
@@ -1544,9 +1572,7 @@ impl DiffState {
         };
         let document = &self.files[file];
         let mut spans: [Option<(usize, usize)>; 2] = [None, None];
-        for row in self.rows[start..].iter().take_while(|row| {
-            matches!(row, DisplayRow::Code { changed: true, file: in_file, .. } if *in_file == file)
-        }) {
+        for row in self.group_rows(start) {
             let DisplayRow::Code {
                 original, modified, ..
             } = row
