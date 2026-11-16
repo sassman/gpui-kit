@@ -816,6 +816,42 @@ fn change_keys_mark_the_reached_group_and_step_from_a_visible_mark(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn scroll_to_top_line_restores_what_top_line_read(cx: &mut TestAppContext) {
+    let patch: String = (0..40)
+        .map(|ix| {
+            let line = ix * 20 + 1;
+            format!("@@ -{line},1 +{line},1 @@\n-old {ix}\n+new {ix}\n")
+        })
+        .collect();
+    let (handle, state) = review(cx, &patch, None, DiffMode::Unified, vec![]);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Read somewhere mid-document, then remember the page by its top row.
+        state.update(cx, |state, cx| {
+            let position = DiffLinePosition::new("review.txt", DiffSide::Original, 401);
+            state.scroll_to_line(position, cx)
+        });
+        window.render_frame(cx);
+        let page = state.read(cx).top_line().expect("a top row");
+
+        // A jump pulls the reader elsewhere.
+        state.update(cx, |state, cx| {
+            let position = DiffLinePosition::new("review.txt", DiffSide::Original, 101);
+            state.scroll_to_line(position, cx)
+        });
+        window.render_frame(cx);
+        assert_ne!(state.read(cx).top_line().as_ref(), Some(&page));
+
+        // Going back restores the exact page: the remembered row is the top
+        // row again, not re-centered half a viewport away.
+        state.update(cx, |state, cx| state.scroll_to_top_line(page.clone(), cx));
+        window.render_frame(cx);
+        assert_eq!(state.read(cx).top_line(), Some(page));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn change_keys_stop_at_the_ends_instead_of_wrapping(cx: &mut TestAppContext) {
     let patch: String = (0..40)
         .map(|ix| {
