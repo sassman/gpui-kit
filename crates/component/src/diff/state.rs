@@ -1031,6 +1031,24 @@ impl DiffState {
         self.line_index(position).is_some()
     }
 
+    /// Reveals and scrolls to a source line like
+    /// [`scroll_to_line`](Self::scroll_to_line), but lands it exactly at the
+    /// top of the viewport - the row [`top_line`](Self::top_line) reads. The
+    /// pair restores a remembered reading position without re-centering: the
+    /// page comes back as it was left, not rearranged around its first line.
+    pub fn scroll_to_top_line(&mut self, position: DiffLinePosition, cx: &mut Context<Self>) {
+        if self.line_index(&position).is_none() {
+            return;
+        }
+        if self.collapsed.remove(position.path().as_str()) {
+            self.rebuild_at_anchor();
+        }
+        if self.expand_line(&position).is_some() {
+            self.reveal_line(&position);
+            cx.notify();
+        }
+    }
+
     /// Scrolls the block of `rows` display rows starting at `start` to the
     /// middle of the viewport, where the eye finds a landing without hunting
     /// the top edge. A block taller than the viewport, or one scrolled before
