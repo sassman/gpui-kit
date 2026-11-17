@@ -66,6 +66,8 @@ pub struct DiffSpanHighlight {
     span: Range<usize>,
     background: Option<Hsla>,
     foreground: Option<Hsla>,
+    filled: bool,
+    underlined: bool,
 }
 
 impl DiffSpanHighlight {
@@ -76,7 +78,20 @@ impl DiffSpanHighlight {
             span,
             background: None,
             foreground: None,
+            filled: true,
+            underlined: false,
         }
+    }
+    /// Paints no fill, leaving whatever the line shows beneath the span:
+    /// for emphasis carried by the text itself, such as a link.
+    pub fn without_background(mut self) -> Self {
+        self.filled = false;
+        self
+    }
+    /// Underlines the span in its text color, the way a link reads.
+    pub fn with_underline(mut self) -> Self {
+        self.underlined = true;
+        self
     }
     /// Sets the fill, which defaults to a translucent warning color.
     pub fn with_background(mut self, background: impl Into<Hsla>) -> Self {
@@ -101,6 +116,14 @@ impl DiffSpanHighlight {
     /// The text color set with [`Self::with_foreground`].
     pub fn foreground(&self) -> Option<Hsla> {
         self.foreground
+    }
+    /// False after [`Self::without_background`].
+    pub fn is_filled(&self) -> bool {
+        self.filled
+    }
+    /// True after [`Self::with_underline`].
+    pub fn is_underlined(&self) -> bool {
+        self.underlined
     }
 }
 
