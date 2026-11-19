@@ -914,11 +914,11 @@ ConflictResolv:
     zh-CN: 采用上游更改
     zh-HK: 採用上游變更
   TakeBoth:
-    en: Take both
-    pt-BR: "Usar ambas"
-    ru: "Принять оба"
-    zh-CN: 同时采用两者
-    zh-HK: 同時採用兩者
+    en: Take both, yours above upstream
+    pt-BR: "Usar ambas, a sua acima da do upstream"
+    ru: "Принять оба, ваше изменение выше upstream"
+    zh-CN: 同时采用两者，你的在上
+    zh-HK: 同時採用兩者，你的在上
   UndoBlock:
     en: Undo, back to unresolved
     pt-BR: "Desfazer, voltar a não resolvido"

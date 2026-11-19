@@ -61,6 +61,7 @@ icons/map.svg
 icons/maximize.svg
 icons/memory-stick.svg
 icons/menu.svg
+icons/merge.svg
 icons/mic.svg
 icons/minimize.svg
 icons/minus.svg

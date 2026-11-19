@@ -30,9 +30,11 @@ use crate::{
 ///
 /// All rows are laid out at full height: the consumer scrolls the whole
 /// surface, while each pane scrolls long lines horizontally on its own.
-/// Pane labels come from the application, which knows the operation's refs,
-/// for example "Your changes · feature". Per-block controls sit in the
-/// gutters between the panes; block backgrounds tint by resolution state.
+/// Each pane carries its own 1-based line numbers. Pane labels come from the
+/// application, which knows the operation's refs, for example "Your changes
+/// · feature". Per-block controls sit in the middle pane's edge gutters,
+/// whose outer borders divide the panes; block backgrounds tint by
+/// resolution state.
 #[derive(IntoElement)]
 pub struct ConflictResolv {
     state: Entity<ConflictResolvState>,
@@ -112,13 +114,25 @@ impl Styled for ConflictResolv {
 
 /// Shared metrics and colors for the panes and gutters of one render pass.
 struct PaneStyle {
+    rem: Pixels,
     row_height: Pixels,
     header_height: Pixels,
     font_size: Pixels,
+    number_size: Pixels,
     font_family: SharedString,
     border: Hsla,
     header_bg: Hsla,
     header_fg: Hsla,
+    number_fg: Hsla,
+}
+
+impl PaneStyle {
+    /// The gutter width that fits the pane's largest line number, sized
+    /// like the Diff component's gutter.
+    fn number_width(&self, lines: usize) -> Pixels {
+        let digits = lines.max(1).to_string().len();
+        self.number_size * 0.7 * digits as f32 + self.rem
+    }
 }
 
 fn render_pane(
@@ -130,12 +144,24 @@ fn render_pane(
     backgrounds: &[Option<Hsla>],
     style: &PaneStyle,
 ) -> AnyElement {
+    let mut numbers = v_flex().w(style.number_width(lines.len())).flex_none();
     let mut body = v_flex().min_w_full();
     for (row_ix, row) in rows.iter().enumerate() {
-        let content = match cell(row) {
-            ConflictCell::Line(ix) => Some(lines[ix].clone()),
-            ConflictCell::Spacer => None,
+        let (number, content) = match cell(row) {
+            ConflictCell::Line(ix) => (Some((ix + 1).to_string()), Some(lines[ix].clone())),
+            // A spacer pads block alignment, so it carries no number.
+            ConflictCell::Spacer => (None, None),
         };
+        numbers = numbers.child(
+            h_flex()
+                .h(style.row_height)
+                .px_1()
+                .justify_end()
+                .text_size(style.number_size)
+                .text_color(style.number_fg)
+                .when_some(backgrounds[row_ix], |this, bg| this.bg(bg))
+                .when_some(number, |this, number| this.child(number)),
+        );
         body = body.child(
             h_flex()
                 .h(style.row_height)
@@ -161,18 +187,27 @@ fn render_pane(
                 .child(label),
         )
         .child(
-            div()
+            h_flex()
                 .w_full()
+                .items_start()
                 .font_family(style.font_family.clone())
                 .text_size(style.font_size)
-                .overflow_x_scrollbar()
-                .id(id)
-                .child(body),
+                .child(numbers)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_x_scrollbar()
+                        .id(id)
+                        .child(body),
+                ),
         )
         .into_any_element()
 }
 
-/// The controls on a block's first row: picks while unresolved, undo after.
+/// The controls on a block's anchor row, both gutters on the middle pane's
+/// edges: while unresolved the left one picks from yours (with take-both),
+/// the right one picks from upstream; once resolved the right one undoes.
 fn gutter_controls(
     left: bool,
     block: usize,
@@ -204,27 +239,45 @@ fn gutter_controls(
                 t!("ConflictResolv.TakeYours").to_string(),
                 |state, block, cx| state.take_yours(block, cx),
             ),
+            // Two flows joining into one reads as "both sides"; the tooltip
+            // carries the order, yours above upstream.
             button(
                 "take-both",
-                IconName::ChevronsRightLeft,
+                IconName::Merge,
                 t!("ConflictResolv.TakeBoth").to_string(),
                 |state, block, cx| state.take_both(block, cx),
             ),
         ],
-        (true, false) => vec![button(
-            "undo-block",
-            IconName::Undo,
-            t!("ConflictResolv.UndoBlock").to_string(),
-            |state, block, cx| state.undo_block(block, cx),
-        )],
+        (true, false) => Vec::new(),
         (false, true) => vec![button(
             "take-upstream",
             IconName::ArrowLeft,
             t!("ConflictResolv.TakeUpstream").to_string(),
             |state, block, cx| state.take_upstream(block, cx),
         )],
-        (false, false) => Vec::new(),
+        (false, false) => vec![button(
+            "undo-block",
+            IconName::Undo,
+            t!("ConflictResolv.UndoBlock").to_string(),
+            |state, block, cx| state.undo_block(block, cx),
+        )],
     }
+}
+
+/// The row a block's gutter controls anchor to: its first row. Whether they
+/// should instead center vertically within the block is undecided, so the
+/// choice stays confined to this function.
+fn control_anchor_rows(rows: &[ConflictRow]) -> Vec<Option<usize>> {
+    let mut seen = None;
+    rows.iter()
+        .map(|row| match row.kind {
+            ConflictRowKind::Block(ix) if seen != Some(ix) => {
+                seen = Some(ix);
+                Some(ix)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -232,21 +285,29 @@ fn render_gutter(
     left: bool,
     width: Pixels,
     rows: &[ConflictRow],
-    first_block_rows: &[Option<usize>],
+    anchor_rows: &[Option<usize>],
     resolutions: &[BlockResolution],
     backgrounds: &[Option<Hsla>],
     state: &Entity<ConflictResolvState>,
     style: &PaneStyle,
 ) -> AnyElement {
-    let mut gutter = v_flex().w(width).flex_none().child(
-        div()
-            .h(style.header_height)
-            .bg(style.header_bg)
-            .border_b_1()
-            .border_color(style.border),
-    );
+    let mut gutter = v_flex()
+        .w(width)
+        .flex_none()
+        // The gutter's outer edge is the pane divider, full height, so the
+        // boundary and its controls read as one.
+        .when(left, |this| this.border_l_1())
+        .when(!left, |this| this.border_r_1())
+        .border_color(style.border)
+        .child(
+            div()
+                .h(style.header_height)
+                .bg(style.header_bg)
+                .border_b_1()
+                .border_color(style.border),
+        );
     for (row_ix, _) in rows.iter().enumerate() {
-        let controls = first_block_rows[row_ix].map(|block| (block, resolutions[block]));
+        let controls = anchor_rows[row_ix].map(|block| (block, resolutions[block]));
         gutter = gutter.child(
             h_flex()
                 .h(style.row_height)
@@ -265,13 +326,17 @@ impl RenderOnce for ConflictResolv {
         let rem = window.rem_size();
         let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
         let style = PaneStyle {
+            rem,
             row_height: font_size * 1.6,
             header_height: px(26.),
             font_size,
+            // Quieter than the code, as in the Diff gutter.
+            number_size: font_size * 0.8,
             font_family: cx.theme().mono_font_family.clone(),
             border: cx.theme().border,
             header_bg: cx.theme().secondary,
             header_fg: cx.theme().muted_foreground,
+            number_fg: cx.theme().muted_foreground,
         };
         let state = self.state.read(cx);
         let rows = state.rows().to_vec();
@@ -288,17 +353,7 @@ impl RenderOnce for ConflictResolv {
                 ConflictRowKind::Block(ix) => Some(self.tint(resolutions[ix], cx)),
             })
             .collect();
-        let mut seen = None;
-        let first_block_rows: Vec<Option<usize>> = rows
-            .iter()
-            .map(|row| match row.kind {
-                ConflictRowKind::Block(ix) if seen != Some(ix) => {
-                    seen = Some(ix);
-                    Some(ix)
-                }
-                _ => None,
-            })
-            .collect();
+        let anchor_rows = control_anchor_rows(&rows);
         let yours_label = self
             .yours_label
             .clone()
@@ -332,7 +387,7 @@ impl RenderOnce for ConflictResolv {
                 true,
                 px(46.),
                 &rows,
-                &first_block_rows,
+                &anchor_rows,
                 &resolutions,
                 &backgrounds,
                 &entity,
@@ -351,7 +406,7 @@ impl RenderOnce for ConflictResolv {
                 false,
                 px(24.),
                 &rows,
-                &first_block_rows,
+                &anchor_rows,
                 &resolutions,
                 &backgrounds,
                 &entity,
