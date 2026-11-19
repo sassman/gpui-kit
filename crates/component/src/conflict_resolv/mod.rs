@@ -6,8 +6,10 @@
 mod model;
 mod state;
 
-pub use model::{BlockResolution, ConflictCell, ConflictRow, ConflictRowKind};
+pub use model::BlockResolution;
 pub use state::{ConflictResolvEvent, ConflictResolvState};
+
+use model::{ConflictCell, ConflictRow, ConflictRowKind};
 
 use gpui::{
     AnyElement, App, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -78,21 +80,27 @@ impl ConflictResolv {
         self.upstream_label = Some(label.into());
         self
     }
-    /// Overrides the tint behind blocks in `resolution` state. The defaults
-    /// follow the theme, with unresolved clearly set apart.
+    /// Overrides the tint behind blocks in `resolution` state. The color
+    /// renders verbatim, so include any transparency in it; only the
+    /// theme-following defaults carry their own wash, with unresolved
+    /// clearly set apart.
     pub fn block_tint(mut self, resolution: BlockResolution, color: impl Into<Hsla>) -> Self {
         self.tints[tint_slot(resolution)] = Some(color.into());
         self
     }
 
     fn tint(&self, resolution: BlockResolution, cx: &App) -> Hsla {
-        self.tints[tint_slot(resolution)].unwrap_or(match resolution {
-            BlockResolution::Unresolved => cx.theme().warning,
-            BlockResolution::TakenYours => cx.theme().success,
-            BlockResolution::TakenUpstream => cx.theme().info,
-            BlockResolution::Both => cx.theme().primary,
-            BlockResolution::HandEdited => cx.theme().muted_foreground,
-        })
+        if let Some(color) = self.tints[tint_slot(resolution)] {
+            return color;
+        }
+        // Unresolved stands out; a resolved tint reads as a quiet wash.
+        match resolution {
+            BlockResolution::Unresolved => cx.theme().warning.opacity(0.2),
+            BlockResolution::TakenYours => cx.theme().success.opacity(0.12),
+            BlockResolution::TakenUpstream => cx.theme().info.opacity(0.12),
+            BlockResolution::Both => cx.theme().primary.opacity(0.12),
+            BlockResolution::HandEdited => cx.theme().muted_foreground.opacity(0.12),
+        }
     }
 }
 
@@ -273,17 +281,11 @@ impl RenderOnce for ConflictResolv {
         let resolutions: Vec<BlockResolution> = (0..state.block_count())
             .map(|ix| state.resolution(ix))
             .collect();
-        // Unresolved blocks stand out; a resolved tint reads as a quiet wash.
         let backgrounds: Vec<Option<Hsla>> = rows
             .iter()
             .map(|row| match row.kind {
                 ConflictRowKind::Context => None,
-                ConflictRowKind::Block(ix) => Some(match resolutions[ix] {
-                    BlockResolution::Unresolved => {
-                        self.tint(BlockResolution::Unresolved, cx).opacity(0.2)
-                    }
-                    resolution => self.tint(resolution, cx).opacity(0.12),
-                }),
+                ConflictRowKind::Block(ix) => Some(self.tint(resolutions[ix], cx)),
             })
             .collect();
         let mut seen = None;

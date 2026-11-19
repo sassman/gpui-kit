@@ -33,7 +33,7 @@ pub(crate) enum Pick {
 
 /// What a visual row shows in one pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConflictCell {
+pub(crate) enum ConflictCell {
     /// An index into that pane's column of lines.
     Line(usize),
     /// Padding that keeps a block's rows aligned across the panes.
@@ -42,7 +42,7 @@ pub enum ConflictCell {
 
 /// Which part of the file a visual row belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConflictRowKind {
+pub(crate) enum ConflictRowKind {
     /// Shared lines outside every conflict; the three cells align 1:1.
     Context,
     /// A conflict block, by the index [`super::ConflictResolvState`] queries accept.
@@ -51,7 +51,7 @@ pub enum ConflictRowKind {
 
 /// One visual row across the three panes: yours, result, upstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConflictRow {
+pub(crate) struct ConflictRow {
     pub kind: ConflictRowKind,
     pub left: ConflictCell,
     pub middle: ConflictCell,
@@ -224,6 +224,7 @@ impl ConflictModel {
 
     /// Marks a block the embedded editor changed; the splice already
     /// happened as an editor edit, so only the state moves.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mark_hand_edited(&mut self, ix: usize) {
         self.blocks[ix].resolution = BlockResolution::HandEdited;
     }
@@ -292,11 +293,14 @@ impl ConflictModel {
                     ConflictCell::Spacer
                 }
             };
+            // An all-empty block would otherwise span zero rows, hiding
+            // the gutter controls that resolve it; keep one spacer row.
             let height = block
                 .yours
                 .len()
                 .max(block.middle.len())
-                .max(block.upstream.len());
+                .max(block.upstream.len())
+                .max(1);
             for k in 0..height {
                 self.rows.push(ConflictRow {
                     kind: ConflictRowKind::Block(ix),
@@ -472,6 +476,27 @@ mod tests {
         model.mark_hand_edited(0);
         assert_eq!(model.resolution(0), BlockResolution::HandEdited);
         assert!(model.all_resolved());
+        model.undo(0);
+        assert_eq!(model.resolution(0), BlockResolution::Unresolved);
+    }
+
+    #[test]
+    fn an_all_empty_block_still_gets_a_row() {
+        let text = "<<<<<<< ours\n||||||| base\n=======\n>>>>>>> theirs\n";
+        let mut model = ConflictModel::parse("a.txt", text).unwrap();
+        assert_eq!(model.block_count(), 1);
+        // The spacer row keeps the gutter controls visible.
+        assert_eq!(model.rows().len(), 1);
+        assert_eq!(model.rows()[0].kind, ConflictRowKind::Block(0));
+        assert_eq!(left(&model), ["·"]);
+        assert_eq!(middle(&model), ["·"]);
+        assert_eq!(right(&model), ["·"]);
+        model.pick(0, Pick::Yours);
+        assert_eq!(model.resolution(0), BlockResolution::TakenYours);
+        assert!(model.all_resolved());
+        assert_eq!(model.result_text(), "");
+        // Resolving keeps the row, so undo stays reachable too.
+        assert_eq!(model.rows().len(), 1);
         model.undo(0);
         assert_eq!(model.resolution(0), BlockResolution::Unresolved);
     }

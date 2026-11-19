@@ -15,6 +15,9 @@ pub enum ConflictResolvEvent {
     /// Every block is resolved; [`ConflictResolvState::result_text`] holds
     /// the merge result.
     AllBlocksResolved,
+    /// An undo reopened this block, so an earlier [`Self::AllBlocksResolved`]
+    /// no longer holds.
+    BlockReopened(usize),
     /// Free typing changed the middle buffer; reserved for the embedded
     /// editor of a later iteration.
     Edited,
@@ -48,7 +51,11 @@ impl ConflictResolvState {
     pub fn block_count(&self) -> usize {
         self.model.block_count()
     }
+    /// The block's state; a stale index reads as unresolved.
     pub fn resolution(&self, block: usize) -> BlockResolution {
+        if block >= self.model.block_count() {
+            return BlockResolution::Unresolved;
+        }
         self.model.resolution(block)
     }
     /// Whether no block is left unresolved. A file without conflicts counts
@@ -60,13 +67,21 @@ impl ConflictResolvState {
     pub fn result_text(&self) -> String {
         self.model.result_text()
     }
-    /// The label of the block's opening marker, such as `HEAD`.
-    pub fn yours_marker(&self, block: usize) -> &SharedString {
-        self.model.yours_label(block)
+    /// The label of the block's opening marker, such as `HEAD`; empty for a
+    /// stale index.
+    pub fn yours_marker(&self, block: usize) -> SharedString {
+        if block >= self.model.block_count() {
+            return SharedString::default();
+        }
+        self.model.yours_label(block).clone()
     }
-    /// The label of the block's closing marker, such as a branch name.
-    pub fn upstream_marker(&self, block: usize) -> &SharedString {
-        self.model.upstream_label(block)
+    /// The label of the block's closing marker, such as a branch name; empty
+    /// for a stale index.
+    pub fn upstream_marker(&self, block: usize) -> SharedString {
+        if block >= self.model.block_count() {
+            return SharedString::default();
+        }
+        self.model.upstream_label(block).clone()
     }
 
     /// Splices the left pane's lines into the block.
@@ -83,16 +98,24 @@ impl ConflictResolvState {
     }
     /// Restores the block's base lines and the unresolved state.
     pub fn undo_block(&mut self, block: usize, cx: &mut Context<Self>) {
-        if self.model.resolution(block) == BlockResolution::Unresolved {
+        if block >= self.model.block_count()
+            || self.model.resolution(block) == BlockResolution::Unresolved
+        {
             return;
         }
         self.model.undo(block);
+        cx.emit(ConflictResolvEvent::BlockReopened(block));
         cx.notify();
     }
-    /// Marks a block the result editor changed by hand. The editor of a
-    /// later iteration calls this from its edit path; it exists now so the
-    /// event contract is complete.
-    pub fn mark_hand_edited(&mut self, block: usize, cx: &mut Context<Self>) {
+    /// Marks a block the result editor changed by hand. Crate-private until
+    /// the embedded editor lands: until then no edit precedes the call, so
+    /// it would resolve an untouched block and silently drop both sides
+    /// from the result.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn mark_hand_edited(&mut self, block: usize, cx: &mut Context<Self>) {
+        if block >= self.model.block_count() {
+            return;
+        }
         let was_all = self.model.all_resolved();
         self.model.mark_hand_edited(block);
         cx.emit(ConflictResolvEvent::Edited);
@@ -100,6 +123,9 @@ impl ConflictResolvState {
     }
 
     fn apply(&mut self, block: usize, pick: Pick, cx: &mut Context<Self>) {
+        if block >= self.model.block_count() {
+            return;
+        }
         let was_all = self.model.all_resolved();
         self.model.pick(block, pick);
         self.finish(block, was_all, cx);
@@ -151,6 +177,8 @@ mod tests {
         state.update(cx, |state, cx| state.take_upstream(1, cx));
         // Undoing reopens the file, so finishing again completes once more.
         state.update(cx, |state, cx| state.undo_block(1, cx));
+        // A second undo on an already unresolved block stays silent.
+        state.update(cx, |state, cx| state.undo_block(1, cx));
         state.update(cx, |state, cx| state.take_both(1, cx));
         assert_eq!(
             *events.borrow(),
@@ -158,6 +186,7 @@ mod tests {
                 ConflictResolvEvent::BlockResolved(0),
                 ConflictResolvEvent::BlockResolved(1),
                 ConflictResolvEvent::AllBlocksResolved,
+                ConflictResolvEvent::BlockReopened(1),
                 ConflictResolvEvent::BlockResolved(1),
                 ConflictResolvEvent::AllBlocksResolved,
             ]
@@ -166,6 +195,32 @@ mod tests {
             assert_eq!(state.result_text(), "a\nl\nb\nl2\nr2\nc\n");
             assert!(state.all_resolved());
         });
+    }
+
+    #[gpui::test]
+    fn stale_block_indices_are_ignored(cx: &mut TestAppContext) {
+        let state = cx.new(|_| {
+            ConflictResolvState::parse("a.txt", "x\n<<<<<<< a\n1\n=======\n2\n>>>>>>> b\n").unwrap()
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let log = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&state, move |_, event: &ConflictResolvEvent, _| {
+                log.borrow_mut().push(event.clone());
+            })
+        });
+        state.update(cx, |state, cx| {
+            state.take_yours(7, cx);
+            state.take_both(7, cx);
+            state.undo_block(7, cx);
+            state.mark_hand_edited(7, cx);
+            assert_eq!(state.resolution(7), BlockResolution::Unresolved);
+            assert_eq!(state.yours_marker(7), SharedString::default());
+            assert_eq!(state.upstream_marker(7), SharedString::default());
+            assert_eq!(state.result_text(), "x\n");
+            assert!(!state.all_resolved());
+        });
+        assert!(events.borrow().is_empty());
     }
 
     #[gpui::test]
