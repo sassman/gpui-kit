@@ -23,6 +23,7 @@ icons/chevron-down.svg
 icons/chevron-left.svg
 icons/chevron-right.svg
 icons/chevron-up.svg
+icons/chevrons-right-left.svg
 icons/chevrons-up-down.svg
 icons/circle-alert.svg
 icons/circle-check.svg

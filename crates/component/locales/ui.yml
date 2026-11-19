@@ -882,3 +882,46 @@ Diff:
     ru: "Изменения в файлах: %{count}"
     zh-CN: "%{count} 个文件的差异"
     zh-HK: "%{count} 個檔案的差異"
+ConflictResolv:
+  YourChanges:
+    en: Your changes
+    pt-BR: "Suas mudanças"
+    ru: "Ваши изменения"
+    zh-CN: 你的更改
+    zh-HK: 你的變更
+  Result:
+    en: Result
+    pt-BR: "Resultado"
+    ru: "Результат"
+    zh-CN: 结果
+    zh-HK: 結果
+  UpstreamChanges:
+    en: Upstream changes
+    pt-BR: "Mudanças do upstream"
+    ru: "Изменения из upstream"
+    zh-CN: 上游更改
+    zh-HK: 上游變更
+  TakeYours:
+    en: Take your change
+    pt-BR: "Usar a sua mudança"
+    ru: "Принять ваше изменение"
+    zh-CN: 采用你的更改
+    zh-HK: 採用你的變更
+  TakeUpstream:
+    en: Take upstream change
+    pt-BR: "Usar a mudança do upstream"
+    ru: "Принять изменение из upstream"
+    zh-CN: 采用上游更改
+    zh-HK: 採用上游變更
+  TakeBoth:
+    en: Take both
+    pt-BR: "Usar ambas"
+    ru: "Принять оба"
+    zh-CN: 同时采用两者
+    zh-HK: 同時採用兩者
+  UndoBlock:
+    en: Undo, back to unresolved
+    pt-BR: "Desfazer, voltar a não resolvido"
+    ru: "Отменить, вернуть неразрешённым"
+    zh-CN: 撤销，恢复为未解决
+    zh-HK: 復原，恢復為未解決

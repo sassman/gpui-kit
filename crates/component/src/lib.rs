@@ -42,6 +42,7 @@ pub mod collapsible;
 pub mod color_picker;
 pub mod combobox;
 pub mod command;
+pub mod conflict_resolv;
 pub mod description_list;
 pub mod dialog;
 pub mod diff;
