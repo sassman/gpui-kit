@@ -41,6 +41,7 @@ icons/eye-off.svg
 icons/eye.svg
 icons/file-text.svg
 icons/file.svg
+icons/fold-horizontal.svg
 icons/folder-closed.svg
 icons/folder-open.svg
 icons/folder.svg
@@ -61,7 +62,6 @@ icons/map.svg
 icons/maximize.svg
 icons/memory-stick.svg
 icons/menu.svg
-icons/merge.svg
 icons/mic.svg
 icons/minimize.svg
 icons/minus.svg

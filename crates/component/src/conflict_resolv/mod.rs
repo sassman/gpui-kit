@@ -281,7 +281,9 @@ fn take_both_button(block: usize, state: &Entity<ConflictResolvState>) -> AnyEle
     Button::new(("take-both", block))
         .ghost()
         .xsmall()
-        .icon(IconName::Merge)
+        // Inward arrows onto the center line: both sides flow into the
+        // result, extending the gutter arrows' vocabulary.
+        .icon(IconName::FoldHorizontal)
         .tooltip(t!("ConflictResolv.TakeBoth").to_string())
         .on_click(move |_, _, cx| state.update(cx, |state, cx| state.take_both(block, cx)))
         .into_any_element()
