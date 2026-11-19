@@ -32,9 +32,9 @@ use crate::{
 /// surface, while each pane scrolls long lines horizontally on its own.
 /// Each pane carries its own 1-based line numbers. Pane labels come from the
 /// application, which knows the operation's refs, for example "Your changes
-/// · feature". Per-block controls sit in the middle pane's edge gutters,
-/// whose outer borders divide the panes; block backgrounds tint by
-/// resolution state.
+/// · feature". Per-block pick arrows sit in the middle pane's edge gutters,
+/// whose outer borders divide the panes, while take-both floats centered
+/// over the result; block backgrounds tint by resolution state.
 #[derive(IntoElement)]
 pub struct ConflictResolv {
     state: Entity<ConflictResolvState>,
@@ -135,6 +135,7 @@ impl PaneStyle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_pane(
     id: &'static str,
     label: SharedString,
@@ -142,6 +143,7 @@ fn render_pane(
     cell: impl Fn(&ConflictRow) -> ConflictCell,
     lines: &[SharedString],
     backgrounds: &[Option<Hsla>],
+    overlays: Vec<(usize, AnyElement)>,
     style: &PaneStyle,
 ) -> AnyElement {
     let mut numbers = v_flex().w(style.number_width(lines.len())).flex_none();
@@ -175,6 +177,7 @@ fn render_pane(
     v_flex()
         .flex_1()
         .min_w_0()
+        .relative()
         .child(
             h_flex()
                 .h(style.header_height)
@@ -202,12 +205,27 @@ fn render_pane(
                         .child(body),
                 ),
         )
+        // Anchored to the pane, not the scroll content, so a control stays
+        // centered in view and never shifts the row's text.
+        .children(overlays.into_iter().map(|(row_ix, control)| {
+            div()
+                .absolute()
+                .top(style.header_height + style.row_height * row_ix as f32)
+                .left_0()
+                .right_0()
+                .h(style.row_height)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(control)
+        }))
         .into_any_element()
 }
 
 /// The controls on a block's anchor row, both gutters on the middle pane's
-/// edges: while unresolved the left one picks from yours (with take-both),
-/// the right one picks from upstream; once resolved the right one undoes.
+/// edges: while unresolved the left one picks from yours, the right one
+/// picks from upstream; once resolved the right one undoes. Take-both
+/// floats over the middle pane instead, see [`take_both_button`].
 fn gutter_controls(
     left: bool,
     block: usize,
@@ -232,22 +250,12 @@ fn gutter_controls(
             .into_any_element()
     };
     match (left, resolution == BlockResolution::Unresolved) {
-        (true, true) => vec![
-            button(
-                "take-yours",
-                IconName::ArrowRight,
-                t!("ConflictResolv.TakeYours").to_string(),
-                |state, block, cx| state.take_yours(block, cx),
-            ),
-            // Two flows joining into one reads as "both sides"; the tooltip
-            // carries the order, yours above upstream.
-            button(
-                "take-both",
-                IconName::Merge,
-                t!("ConflictResolv.TakeBoth").to_string(),
-                |state, block, cx| state.take_both(block, cx),
-            ),
-        ],
+        (true, true) => vec![button(
+            "take-yours",
+            IconName::ArrowRight,
+            t!("ConflictResolv.TakeYours").to_string(),
+            |state, block, cx| state.take_yours(block, cx),
+        )],
         (true, false) => Vec::new(),
         (false, true) => vec![button(
             "take-upstream",
@@ -264,9 +272,25 @@ fn gutter_controls(
     }
 }
 
-/// The row a block's gutter controls anchor to: its first row. Whether they
-/// should instead center vertically within the block is undecided, so the
-/// choice stays confined to this function.
+/// Take-both writes both sides into the result, so it belongs to neither
+/// gutter: it floats horizontally centered over the middle pane's anchor
+/// row. Two flows joining into one reads as "both sides"; the tooltip
+/// carries the order, yours above upstream.
+fn take_both_button(block: usize, state: &Entity<ConflictResolvState>) -> AnyElement {
+    let state = state.clone();
+    Button::new(("take-both", block))
+        .ghost()
+        .xsmall()
+        .icon(IconName::Merge)
+        .tooltip(t!("ConflictResolv.TakeBoth").to_string())
+        .on_click(move |_, _, cx| state.update(cx, |state, cx| state.take_both(block, cx)))
+        .into_any_element()
+}
+
+/// The row a block's controls anchor to, gutter arrows and the floating
+/// take-both alike: its first row. Whether they should instead center
+/// vertically within the block is undecided, so the choice stays confined
+/// to this function.
 fn control_anchor_rows(rows: &[ConflictRow]) -> Vec<Option<usize>> {
     let mut seen = None;
     rows.iter()
@@ -367,6 +391,15 @@ impl RenderOnce for ConflictResolv {
             .clone()
             .unwrap_or_else(|| t!("ConflictResolv.UpstreamChanges").to_string().into());
         let entity = self.state.clone();
+        let take_both_overlays: Vec<(usize, AnyElement)> = anchor_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_ix, block)| {
+                block
+                    .filter(|&block| resolutions[block] == BlockResolution::Unresolved)
+                    .map(|block| (row_ix, take_both_button(block, &entity)))
+            })
+            .collect();
         h_flex()
             .id(("conflict-resolv", entity.entity_id()))
             .w_full()
@@ -381,11 +414,12 @@ impl RenderOnce for ConflictResolv {
                 |row| row.left,
                 &yours,
                 &backgrounds,
+                Vec::new(),
                 &style,
             ))
             .child(render_gutter(
                 true,
-                px(46.),
+                px(24.),
                 &rows,
                 &anchor_rows,
                 &resolutions,
@@ -400,6 +434,7 @@ impl RenderOnce for ConflictResolv {
                 |row| row.middle,
                 &middle,
                 &backgrounds,
+                take_both_overlays,
                 &style,
             ))
             .child(render_gutter(
@@ -419,6 +454,7 @@ impl RenderOnce for ConflictResolv {
                 |row| row.right,
                 &upstream,
                 &backgrounds,
+                Vec::new(),
                 &style,
             ))
             .refine_style(&self.style)
