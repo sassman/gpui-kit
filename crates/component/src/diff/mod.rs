@@ -506,6 +506,8 @@ impl Diff {
         self
     }
     /// Handles a click on a line's code, outside a text-selection drag.
+    /// A click that [`Self::on_text_click`] claims does not reach this
+    /// handler.
     pub fn on_line_click<F>(mut self, handler: F) -> Self
     where
         F: Fn(&DiffLinePosition, &ClickEvent, &mut Window, &mut App) + 'static,
@@ -533,8 +535,11 @@ impl Diff {
         self
     }
     /// Handles a click on a character of source text, outside a
-    /// text-selection drag. Returning true claims the click, and
-    /// [`Self::on_line_click`] is not called for it.
+    /// text-selection drag. The text handler runs first and its return
+    /// value decides who wins: true claims the click and
+    /// [`Self::on_line_click`] is not called for it; false lets the click
+    /// fall through to the line handler. A click that lands on no
+    /// character goes to the line handler directly.
     pub fn on_text_click<F>(mut self, handler: F) -> Self
     where
         F: Fn(&DiffTextPosition, &ClickEvent, &mut Window, &mut App) -> bool + 'static,
@@ -1917,10 +1922,10 @@ fn line_highlights(
             highlights.push((
                 range,
                 HighlightStyle {
-                    background_color: span.is_filled().then(|| {
+                    background_color: Some(
                         span.background()
-                            .unwrap_or_else(|| cx.theme().warning.opacity(0.5))
-                    }),
+                            .unwrap_or_else(|| cx.theme().warning.opacity(0.5)),
+                    ),
                     color: span.foreground(),
                     underline: span.is_underlined().then(|| gpui::UnderlineStyle {
                         thickness: px(1.),

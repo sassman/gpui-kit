@@ -136,9 +136,10 @@ impl DiffFile {
     }
 
     /// Parts of a file shown for reference, without changes, each keeping
-    /// its own line numbers: `(first line, text)` per part, in file order.
-    /// Like [`Self::unchanged`] it is a single column in every display
-    /// mode; the lines between the parts are simply not there.
+    /// its own line numbers: `(first line, text)` per part, in file order
+    /// without overlap. A first line below 1 is clamped to 1. Like
+    /// [`Self::unchanged`] it is a single column in every display mode;
+    /// the lines between the parts are simply not there.
     pub fn excerpts<'a>(
         path: impl Into<SharedString>,
         parts: impl IntoIterator<Item = (usize, &'a str)>,
@@ -151,6 +152,10 @@ impl DiffFile {
             if !source.is_empty() && !source.ends_with('\n') {
                 source.push('\n');
             }
+            debug_assert!(
+                lines.last().is_none_or(|(line, _)| first.max(1) > *line),
+                "excerpt parts must come in file order without overlap"
+            );
             let offset = source.len();
             lines.extend(
                 line_ranges(text)

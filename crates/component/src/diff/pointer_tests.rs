@@ -34,7 +34,7 @@ impl Render for Host {
                     DiffLinePosition::new("file.rs", DiffSide::Modified, 1),
                     3..8,
                 )
-                .without_background()
+                .with_background(gpui::transparent_black())
                 .with_underline()])
                 .on_text_hover(move |hit, modifiers, _, _| {
                     hovered.borrow_mut().push((
