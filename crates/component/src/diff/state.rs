@@ -284,6 +284,9 @@ pub struct DiffState {
     /// Indices into `folds` whose rows show; reset with the fold set.
     revealed_folds: HashSet<usize>,
     resolutions: HashMap<(SharedString, usize), DiffConflictResolution>,
+    /// Conflicts show without their Accept and Undo commands: for a viewer
+    /// that only forecasts a merge, resolving would be a write it cannot do.
+    conflicts_read_only: bool,
     file_rows: Vec<FileRows>,
     header_rows: Vec<usize>,
     rows: Rc<Vec<DisplayRow>>,
@@ -435,6 +438,7 @@ impl DiffState {
             folds: Vec::new(),
             revealed_folds: HashSet::new(),
             resolutions: HashMap::new(),
+            conflicts_read_only: false,
             file_rows: Vec::new(),
             header_rows: Vec::new(),
             rows: Rc::default(),
@@ -478,6 +482,20 @@ impl DiffState {
         self.mode = mode;
         self.rebuild(true);
         self
+    }
+
+    /// Shows conflicts without their Accept and Undo commands. For a viewer
+    /// that only forecasts a merge: the parts and labels still show, but
+    /// there is nothing a click could resolve. Default is `false`.
+    /// [`Self::resolve_conflict`] still works for callers with their own UI.
+    pub fn with_conflicts_read_only(mut self, read_only: bool) -> Self {
+        self.conflicts_read_only = read_only;
+        self
+    }
+
+    /// Whether conflicts show without their resolution commands.
+    pub fn conflicts_read_only(&self) -> bool {
+        self.conflicts_read_only
     }
 
     /// Sets the initial unchanged context around each change. Default is

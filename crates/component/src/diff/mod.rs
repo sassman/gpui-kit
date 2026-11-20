@@ -1325,6 +1325,7 @@ fn render_conflict(
 ) -> AnyElement {
     let document = &code.files[file];
     let conflict = &document.conflicts()[ix];
+    let read_only = code.state.read(cx).conflicts_read_only();
     let resolution = code.state.read(cx).conflict_resolution(document.path(), ix);
     let choose = |id: &'static str, label: String, resolution: Option<DiffConflictResolution>| {
         let state = code.state.clone();
@@ -1356,11 +1357,13 @@ fn render_conflict(
         return row
             .bg(cx.theme().muted.opacity(0.35))
             .child(label.to_string())
-            .child(choose(
-                "undo-resolution",
-                t!("Diff.UndoResolution").to_string(),
-                None,
-            ))
+            .when(!read_only, |this| {
+                this.child(choose(
+                    "undo-resolution",
+                    t!("Diff.UndoResolution").to_string(),
+                    None,
+                ))
+            })
             .into_any_element();
     }
     let title = match part {
@@ -1371,7 +1374,7 @@ fn render_conflict(
     let label = conflict.label(part).clone();
     row.child(div().font_medium().child(title.to_string()))
         .when(!label.is_empty(), |this| this.child(label))
-        .when(part == ConflictPart::Current, |this| {
+        .when(part == ConflictPart::Current && !read_only, |this| {
             this.child(div().flex_1())
                 .child(choose(
                     "accept-current",
