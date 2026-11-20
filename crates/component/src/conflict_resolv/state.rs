@@ -1,10 +1,71 @@
 //! Retained resolver state for one conflicted file, owned by the view that
 //! renders [`super::ConflictResolv`].
+use std::collections::HashSet;
+use std::ops::Range;
+
 use gpui::{AppContext as _, Context, Entity, EventEmitter, SharedString, Window};
 
-use super::model::{BlockResolution, ConflictModel, ConflictRow, Pick};
+use super::model::{BlockResolution, ConflictModel, ConflictRow, ConflictRowKind, Pick};
 use crate::diff::DiffParseError;
 use crate::input::{InputEvent, TextareaState};
+
+/// Unchanged lines kept visible around each block, the frame the Diff
+/// keeps around a change.
+const FOLD_CONTEXT: usize = 3;
+/// The least hidden rows worth a disclosure; shorter runs stay visible.
+const MIN_FOLD: usize = 2;
+
+/// One visual row after folding: a row of the model's table, or a fold
+/// standing in for a run of unchanged rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DisplayRow {
+    Row(usize),
+    /// `rows[hidden]` sit behind one disclosure row; `ix` keys the reveal.
+    Fold {
+        ix: usize,
+        hidden: Range<usize>,
+    },
+}
+
+/// Context runs collapse behind a fold, keeping the [`FOLD_CONTEXT`]
+/// frame toward each neighbouring block; the file's leading and trailing
+/// runs keep the frame only on their block side. Pure presentation:
+/// picks, edits and the result never see folds.
+fn derive_folds(rows: &[ConflictRow], revealed: &HashSet<usize>) -> Vec<DisplayRow> {
+    let mut display = Vec::with_capacity(rows.len());
+    let mut fold_ix = 0;
+    let mut row = 0;
+    while row < rows.len() {
+        if rows[row].kind != ConflictRowKind::Context {
+            display.push(DisplayRow::Row(row));
+            row += 1;
+            continue;
+        }
+        let start = row;
+        while row < rows.len() && rows[row].kind == ConflictRowKind::Context {
+            row += 1;
+        }
+        let head = if start == 0 { 0 } else { FOLD_CONTEXT };
+        let tail = if row == rows.len() { 0 } else { FOLD_CONTEXT };
+        if row - start < head + tail + MIN_FOLD {
+            display.extend((start..row).map(DisplayRow::Row));
+            continue;
+        }
+        display.extend((start..start + head).map(DisplayRow::Row));
+        let hidden = start + head..row - tail;
+        if revealed.contains(&fold_ix) {
+            display.extend(hidden.clone().map(DisplayRow::Row));
+        } else {
+            display.push(DisplayRow::Fold {
+                ix: fold_ix,
+                hidden,
+            });
+        }
+        fold_ix += 1;
+        display.extend((row - tail..row).map(DisplayRow::Row));
+    }
+    display
+}
 
 /// Notifications from the three-pane resolver.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +101,13 @@ pub struct ConflictResolvState {
     /// Blocks whose mounted editor must be reseeded because the model
     /// changed the text underneath it (a pick over a hand edit).
     stale: Vec<bool>,
+    /// The folded view of the row table; see [`derive_folds`].
+    display_rows: Vec<DisplayRow>,
+    /// The model revision the display rows were derived from.
+    folded_revision: Option<u64>,
+    /// Folds opened by hand, by ordinal. An edit that changes the table
+    /// re-derives the folds; the ordinals usually land on the same runs.
+    revealed_folds: HashSet<usize>,
 }
 
 // Owners parse off the UI thread and send the state back, so it must stay
@@ -63,6 +131,9 @@ impl ConflictResolvState {
             model,
             editors: (0..blocks).map(|_| None).collect(),
             stale: vec![false; blocks],
+            display_rows: Vec::new(),
+            folded_revision: None,
+            revealed_folds: HashSet::new(),
         })
     }
 
@@ -258,6 +329,28 @@ impl ConflictResolvState {
         self.model.middle_line_count(block)
     }
 
+    /// Re-derives the folded view when the row table changed; the
+    /// component calls this on render beside [`Self::sync_editors`].
+    pub(crate) fn sync_folds(&mut self) {
+        if self.folded_revision == Some(self.model.rows_revision()) {
+            return;
+        }
+        self.folded_revision = Some(self.model.rows_revision());
+        self.display_rows = derive_folds(self.model.rows(), &self.revealed_folds);
+    }
+
+    /// The folded view; valid after [`Self::sync_folds`].
+    pub(crate) fn display_rows(&self) -> &[DisplayRow] {
+        &self.display_rows
+    }
+
+    /// Opens fold `ix`, putting its hidden rows back inline.
+    pub(crate) fn reveal_fold(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.revealed_folds.insert(ix);
+        self.display_rows = derive_folds(self.model.rows(), &self.revealed_folds);
+        cx.notify();
+    }
+
     pub(crate) fn rows(&self) -> &[ConflictRow] {
         self.model.rows()
     }
@@ -281,6 +374,82 @@ mod tests {
     use super::*;
 
     const TEXT: &str = "a\n<<<<<<< yours\nl\n=======\nr\n>>>>>>> upstream\nb\n<<<<<<< yours\nl2\n=======\nr2\n>>>>>>> upstream\nc\n";
+
+    /// Ten context lines, a conflict, ten more, a conflict, ten more.
+    fn long_text() -> String {
+        let run = |name: &str| (0..10).map(|i| format!("{name} {i}\n")).collect::<String>();
+        let conflict = "<<<<<<< yours\nx\n=======\ny\n>>>>>>> upstream\n";
+        format!(
+            "{}{conflict}{}{conflict}{}",
+            run("head"),
+            run("mid"),
+            run("tail")
+        )
+    }
+
+    #[test]
+    fn long_context_runs_fold_behind_a_disclosure() {
+        let mut state = ConflictResolvState::parse("f", &long_text()).unwrap();
+        state.sync_folds();
+        // The leading run keeps its frame only toward the block (7 hidden),
+        // the middle run keeps a frame on both sides (4 hidden), the
+        // trailing run again one side (7 hidden).
+        let folds: Vec<usize> = state
+            .display_rows()
+            .iter()
+            .filter_map(|row| match row {
+                DisplayRow::Fold { hidden, .. } => Some(hidden.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(folds, vec![7, 4, 7]);
+        // Every block row survives folding, in order.
+        let blocks = |rows: &[ConflictRow]| {
+            rows.iter()
+                .filter(|row| row.kind != ConflictRowKind::Context)
+                .count()
+        };
+        let shown = state
+            .display_rows()
+            .iter()
+            .filter(|row| {
+                matches!(row, DisplayRow::Row(ix)
+                    if state.rows()[*ix].kind != ConflictRowKind::Context)
+            })
+            .count();
+        assert_eq!(shown, blocks(state.rows()));
+    }
+
+    #[test]
+    fn short_context_runs_stay_visible() {
+        let mut state = ConflictResolvState::parse("f", TEXT).unwrap();
+        state.sync_folds();
+        assert_eq!(state.display_rows().len(), state.rows().len());
+        assert!(
+            state
+                .display_rows()
+                .iter()
+                .all(|row| matches!(row, DisplayRow::Row(_)))
+        );
+    }
+
+    #[test]
+    fn a_revealed_fold_puts_its_rows_back() {
+        let state = ConflictResolvState::parse("f", &long_text()).unwrap();
+        let folded = derive_folds(state.rows(), &HashSet::new());
+        let revealed = derive_folds(state.rows(), &HashSet::from([1]));
+        // The middle fold's four rows come back inline; the outer folds
+        // stay shut, and nothing else moves.
+        assert_eq!(revealed.len(), folded.len() + 4 - 1);
+        let folds = |display: &[DisplayRow]| {
+            display
+                .iter()
+                .filter(|row| matches!(row, DisplayRow::Fold { .. }))
+                .count()
+        };
+        assert_eq!(folds(&folded), 3);
+        assert_eq!(folds(&revealed), 2);
+    }
 
     #[gpui::test]
     fn picks_emit_block_and_completion_events(cx: &mut TestAppContext) {

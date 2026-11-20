@@ -11,11 +11,12 @@ pub use model::BlockResolution;
 pub use state::{ConflictResolvEvent, ConflictResolvState};
 
 use model::{ConflictCell, ConflictRow, ConflictRowKind};
+use state::DisplayRow;
 
 use gpui::{
     AnyElement, App, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use rust_i18n::t;
 
@@ -146,6 +147,7 @@ impl PaneStyle {
 fn render_pane(
     id: &'static str,
     label: SharedString,
+    display: &[DisplayRow],
     rows: &[ConflictRow],
     cell: impl Fn(&ConflictRow) -> ConflictCell,
     lines: &[SharedString],
@@ -154,6 +156,7 @@ fn render_pane(
     // pane with the row span it covers; only the middle pane passes any.
     editors: &[Option<(Entity<TextareaState>, usize)>],
     overlays: Vec<(usize, AnyElement)>,
+    state: &Entity<ConflictResolvState>,
     style: &PaneStyle,
 ) -> AnyElement {
     let mut numbers = v_flex().w(style.number_width(lines.len())).flex_none();
@@ -161,7 +164,37 @@ fn render_pane(
     // Body rows an editor already spans; their numbers still render.
     let mut covered = 0_usize;
     let mut editor_seen = None;
-    for (row_ix, row) in rows.iter().enumerate() {
+    for (row_ix, entry) in display.iter().enumerate() {
+        let row = match entry {
+            DisplayRow::Row(rix) => &rows[*rix],
+            // The disclosure renders in every pane, so the fold reads as
+            // one band across the surface; any pane's click opens it.
+            DisplayRow::Fold { ix, hidden } => {
+                numbers = numbers.child(div().h(style.row_height));
+                let fold = *ix;
+                let state = state.clone();
+                body = body.child(
+                    h_flex()
+                        .id((id, fold))
+                        .h(style.row_height)
+                        .px_2()
+                        .justify_center()
+                        .whitespace_nowrap()
+                        .line_height(style.row_height)
+                        .text_size(style.number_size)
+                        .text_color(style.number_fg)
+                        .bg(style.header_bg)
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |state, cx| state.reveal_fold(fold, cx))
+                        })
+                        .child(
+                            t!("ConflictResolv.UnchangedLines", count = hidden.len()).to_string(),
+                        ),
+                );
+                continue;
+            }
+        };
         let (number, content) = match cell(row) {
             ConflictCell::Line(ix) => (Some((ix + 1).to_string()), Some(lines[ix].clone())),
             // A spacer pads block alignment, so it carries no number.
@@ -330,15 +363,19 @@ fn take_both_button(block: usize, state: &Entity<ConflictResolvState>) -> AnyEle
 /// take-both alike: its first row. Whether they should instead center
 /// vertically within the block is undecided, so the choice stays confined
 /// to this function.
-fn control_anchor_rows(rows: &[ConflictRow]) -> Vec<Option<usize>> {
+fn control_anchor_rows(display: &[DisplayRow], rows: &[ConflictRow]) -> Vec<Option<usize>> {
     let mut seen = None;
-    rows.iter()
-        .map(|row| match row.kind {
-            ConflictRowKind::Block(ix) if seen != Some(ix) => {
-                seen = Some(ix);
-                Some(ix)
-            }
-            _ => None,
+    display
+        .iter()
+        .map(|entry| match entry {
+            DisplayRow::Row(rix) => match rows[*rix].kind {
+                ConflictRowKind::Block(ix) if seen != Some(ix) => {
+                    seen = Some(ix);
+                    Some(ix)
+                }
+                _ => None,
+            },
+            DisplayRow::Fold { .. } => None,
         })
         .collect()
 }
@@ -347,7 +384,7 @@ fn control_anchor_rows(rows: &[ConflictRow]) -> Vec<Option<usize>> {
 fn render_gutter(
     left: bool,
     width: Pixels,
-    rows: &[ConflictRow],
+    display: &[DisplayRow],
     anchor_rows: &[Option<usize>],
     resolutions: &[BlockResolution],
     backgrounds: &[Option<Hsla>],
@@ -369,12 +406,15 @@ fn render_gutter(
                 .border_b_1()
                 .border_color(style.border),
         );
-    for (row_ix, _) in rows.iter().enumerate() {
+    for (row_ix, entry) in display.iter().enumerate() {
+        // A fold row keeps the band's quiet background through the gutter.
+        let folded = matches!(entry, DisplayRow::Fold { .. });
         let controls = anchor_rows[row_ix].map(|block| (block, resolutions[block]));
         gutter = gutter.child(
             h_flex()
                 .h(style.row_height)
                 .justify_center()
+                .when(folded, |this| this.bg(style.header_bg))
                 .when_some(backgrounds[row_ix], |this, bg| this.bg(bg))
                 .when_some(controls, |this, (block, resolution)| {
                     this.children(gutter_controls(left, block, resolution, state))
@@ -387,9 +427,12 @@ fn render_gutter(
 impl RenderOnce for ConflictResolv {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         // Mount or drop the per-block result editors before reading: render
-        // is the only place a window exists to create input states in.
-        self.state
-            .update(cx, |state, cx| state.sync_editors(window, cx));
+        // is the only place a window exists to create input states in. The
+        // folded view re-derives here too, on the same revision check.
+        self.state.update(cx, |state, cx| {
+            state.sync_editors(window, cx);
+            state.sync_folds();
+        });
         let rem = window.rem_size();
         let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
         let style = PaneStyle {
@@ -405,11 +448,15 @@ impl RenderOnce for ConflictResolv {
             header_fg: cx.theme().muted_foreground,
             number_fg: cx.theme().muted_foreground,
         };
+        let entity = self.state.clone();
+        // Borrowed for the whole pass: the lines and the row table feed
+        // the panes as slices, nothing is copied per frame.
         let state = self.state.read(cx);
-        let rows = state.rows().to_vec();
-        let yours: Vec<SharedString> = state.yours_lines().to_vec();
-        let middle: Vec<SharedString> = state.middle_lines().to_vec();
-        let upstream: Vec<SharedString> = state.upstream_lines().to_vec();
+        let rows = state.rows();
+        let display = state.display_rows();
+        let yours = state.yours_lines();
+        let middle = state.middle_lines();
+        let upstream = state.upstream_lines();
         let resolutions: Vec<BlockResolution> = (0..state.block_count())
             .map(|ix| state.resolution(ix))
             .collect();
@@ -423,14 +470,17 @@ impl RenderOnce for ConflictResolv {
                     .map(|editor| (editor, state.middle_line_count(ix).max(1)))
             })
             .collect();
-        let backgrounds: Vec<Option<Hsla>> = rows
+        let backgrounds: Vec<Option<Hsla>> = display
             .iter()
-            .map(|row| match row.kind {
-                ConflictRowKind::Context => None,
-                ConflictRowKind::Block(ix) => Some(self.tint(resolutions[ix], cx)),
+            .map(|entry| match entry {
+                DisplayRow::Row(rix) => match rows[*rix].kind {
+                    ConflictRowKind::Context => None,
+                    ConflictRowKind::Block(ix) => Some(self.tint(resolutions[ix], cx)),
+                },
+                DisplayRow::Fold { .. } => None,
             })
             .collect();
-        let anchor_rows = control_anchor_rows(&rows);
+        let anchor_rows = control_anchor_rows(display, rows);
         let yours_label = self
             .yours_label
             .clone()
@@ -443,7 +493,6 @@ impl RenderOnce for ConflictResolv {
             .upstream_label
             .clone()
             .unwrap_or_else(|| t!("ConflictResolv.UpstreamChanges").to_string().into());
-        let entity = self.state.clone();
         let take_both_overlays: Vec<(usize, AnyElement)> = anchor_rows
             .iter()
             .enumerate()
@@ -463,18 +512,20 @@ impl RenderOnce for ConflictResolv {
             .child(render_pane(
                 "conflict-yours",
                 yours_label,
-                &rows,
+                display,
+                rows,
                 |row| row.left,
-                &yours,
+                yours,
                 &backgrounds,
                 &[],
                 Vec::new(),
+                &entity,
                 &style,
             ))
             .child(render_gutter(
                 true,
                 px(24.),
-                &rows,
+                display,
                 &anchor_rows,
                 &resolutions,
                 &backgrounds,
@@ -484,18 +535,20 @@ impl RenderOnce for ConflictResolv {
             .child(render_pane(
                 "conflict-result",
                 result_label,
-                &rows,
+                display,
+                rows,
                 |row| row.middle,
-                &middle,
+                middle,
                 &backgrounds,
                 &editors,
                 take_both_overlays,
+                &entity,
                 &style,
             ))
             .child(render_gutter(
                 false,
                 px(24.),
-                &rows,
+                display,
                 &anchor_rows,
                 &resolutions,
                 &backgrounds,
@@ -505,12 +558,14 @@ impl RenderOnce for ConflictResolv {
             .child(render_pane(
                 "conflict-upstream",
                 upstream_label,
-                &rows,
+                display,
+                rows,
                 |row| row.right,
-                &upstream,
+                upstream,
                 &backgrounds,
                 &[],
                 Vec::new(),
+                &entity,
                 &style,
             ))
             .refine_style(&self.style)

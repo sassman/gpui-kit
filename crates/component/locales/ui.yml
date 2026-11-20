@@ -883,6 +883,12 @@ Diff:
     zh-CN: "%{count} 个文件的差异"
     zh-HK: "%{count} 個檔案的差異"
 ConflictResolv:
+  UnchangedLines:
+    en: "%{count} unchanged lines"
+    pt-BR: "%{count} linhas inalteradas"
+    ru: "%{count} неизменённых строк"
+    zh-CN: "%{count} 行未更改"
+    zh-HK: "%{count} 行未變更"
   YourChanges:
     en: Your changes
     pt-BR: "Suas mudanças"

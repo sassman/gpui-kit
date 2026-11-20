@@ -191,6 +191,11 @@ impl ConflictModel {
         self.segments.push(MiddleSegment::Context(lines.concat()));
     }
 
+    /// Bumped on every row table rebuild; derived views re-sync on it.
+    pub(crate) fn rows_revision(&self) -> u64 {
+        self.rows_revision
+    }
+
     pub(crate) fn path(&self) -> &SharedString {
         &self.path
     }
