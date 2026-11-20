@@ -82,7 +82,8 @@ impl ConflictResolvState {
     pub fn all_resolved(&self) -> bool {
         self.model.all_resolved()
     }
-    /// The middle buffer: the merge result once every block is resolved.
+    /// The middle column's text: the merge result once every block is
+    /// resolved, reflecting every pick and hand edit as it stands.
     pub fn result_text(&self) -> String {
         self.model.result_text()
     }
@@ -251,6 +252,12 @@ impl ConflictResolvState {
             .map(|editor| &editor.input)
     }
 
+    /// The number of middle lines the block currently spans; sizes the
+    /// block's embedded editor.
+    pub(crate) fn middle_line_count(&self, block: usize) -> usize {
+        self.model.middle_line_count(block)
+    }
+
     pub(crate) fn rows(&self) -> &[ConflictRow] {
         self.model.rows()
     }
@@ -382,6 +389,21 @@ mod tests {
             // Read-only again: the edit is refused until the next pick.
             state.edit_block(0, "still typing", cx);
             assert_eq!(state.result_text(), "a\nb\nc\n");
+        });
+    }
+
+    #[gpui::test]
+    fn an_emptied_editor_keeps_the_blank_line(cx: &mut TestAppContext) {
+        let text = "keep\n<<<<<<< yours\n\n=======\nx\n>>>>>>> upstream\n";
+        let state = cx.new(|_| ConflictResolvState::parse("a.txt", text).unwrap());
+        state.update(cx, |state, cx| {
+            state.take_yours(0, cx);
+            // Typing, then deleting everything, delivers an empty value;
+            // the picked blank line must survive the round trip.
+            state.edit_block(0, "typed", cx);
+            state.edit_block(0, "", cx);
+            assert_eq!(state.result_text(), "keep\n\n");
+            assert_eq!(state.middle_line_count(0), 1);
         });
     }
 

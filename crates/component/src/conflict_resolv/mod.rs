@@ -151,8 +151,8 @@ fn render_pane(
     lines: &[SharedString],
     backgrounds: &[Option<Hsla>],
     // Per block, the editor that replaces the block's line cells in this
-    // pane; only the middle pane passes any.
-    editors: &[Option<Entity<TextareaState>>],
+    // pane with the row span it covers; only the middle pane passes any.
+    editors: &[Option<(Entity<TextareaState>, usize)>],
     overlays: Vec<(usize, AnyElement)>,
     style: &PaneStyle,
 ) -> AnyElement {
@@ -182,21 +182,14 @@ fn render_pane(
             continue;
         }
         if let ConflictRowKind::Block(ix) = row.kind
-            && let Some(Some(editor)) = editors.get(ix)
+            && let Some(Some((editor, span))) = editors.get(ix)
             && editor_seen != Some(ix)
         {
             editor_seen = Some(ix);
             // The block's line cells fill its first rows; the editor spans
-            // exactly those, sized by the current line count so its rows
-            // land on the row grid. An empty block still spans one row.
-            let span = rows
-                .iter()
-                .filter(|row| {
-                    matches!(row.kind, ConflictRowKind::Block(block) if block == ix)
-                        && matches!(cell(row), ConflictCell::Line(_))
-                })
-                .count()
-                .max(1);
+            // exactly those, precomputed from the block's line count so no
+            // row rescan happens per editor.
+            let span = *span;
             covered = span - 1;
             body = body.child(
                 div()
@@ -420,8 +413,15 @@ impl RenderOnce for ConflictResolv {
         let resolutions: Vec<BlockResolution> = (0..state.block_count())
             .map(|ix| state.resolution(ix))
             .collect();
-        let editors: Vec<Option<Entity<TextareaState>>> = (0..state.block_count())
-            .map(|ix| state.editor(ix).cloned())
+        // An empty block's editor still spans the one row that keeps the
+        // gutter controls visible.
+        let editors: Vec<Option<(Entity<TextareaState>, usize)>> = (0..state.block_count())
+            .map(|ix| {
+                state
+                    .editor(ix)
+                    .cloned()
+                    .map(|editor| (editor, state.middle_line_count(ix).max(1)))
+            })
             .collect();
         let backgrounds: Vec<Option<Hsla>> = rows
             .iter()

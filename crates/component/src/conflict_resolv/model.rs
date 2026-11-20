@@ -19,7 +19,8 @@ pub enum BlockResolution {
     TakenUpstream,
     /// The middle shows yours followed by upstream.
     Both,
-    /// Free typing changed the block; reserved for the embedded editor.
+    /// Free typing in the block's embedded result editor changed the text
+    /// away from the picked lines.
     HandEdited,
 }
 
@@ -102,6 +103,12 @@ pub(crate) struct ConflictModel {
     middle_lines: Vec<SharedString>,
     blocks: Vec<Block>,
     rows: Vec<ConflictRow>,
+    /// Whether the working file uses CRLF endings; the embedded editor
+    /// edits plain `\n`, and write-back restores the file's own endings.
+    crlf: bool,
+    /// Bumped on every row table rebuild, so tests can assert that a
+    /// same-height edit left the table alone.
+    rows_revision: u64,
 }
 
 /// A line for display, without its line ending.
@@ -136,6 +143,8 @@ impl ConflictModel {
             middle_lines: Vec::new(),
             blocks: Vec::new(),
             rows: Vec::new(),
+            crlf: text.contains("\r\n"),
+            rows_revision: 0,
         };
         let mut cursor = 1;
         for conflict in file.conflicts() {
@@ -256,32 +265,73 @@ impl ConflictModel {
     }
 
     /// Applies the embedded editor's value to a block and reports whether
-    /// the text changed. The editor shows lines without the final newline
-    /// the stored texts carry, so the value gains one back; an unresolved
-    /// block is read-only until a pick and refuses the edit.
+    /// the text changed. The value is stored through [`Self::stored_text`];
+    /// an unresolved block is read-only until a pick and refuses the edit.
     pub(crate) fn edit(&mut self, ix: usize, value: &str) -> bool {
         if self.blocks[ix].resolution == BlockResolution::Unresolved {
             return false;
         }
-        let text = if value.is_empty() {
-            String::new()
-        } else {
-            format!("{value}\n")
-        };
+        let text = self.stored_text(ix, value);
         if self.blocks[ix].middle_text == text {
             return false;
         }
+        let range = self.blocks[ix].middle.clone();
         self.blocks[ix].middle_text = text;
-        self.refresh();
+        if line_count(&self.blocks[ix].middle_text) == range.len() {
+            // Same height: patch the block's display lines in place. Every
+            // line range and the row table stay valid, so the keystroke
+            // skips the whole-file rebuild.
+            let lines = display_lines(&self.blocks[ix].middle_text);
+            for (slot, line) in self.middle_lines[range].iter_mut().zip(lines) {
+                *slot = line;
+            }
+        } else {
+            self.refresh();
+        }
         true
     }
 
+    /// The stored form of an editor value: the file's own line endings and
+    /// a final terminator, so Enter at the region's end grows the block by
+    /// a real line. An empty value keeps one blank line - the editor's
+    /// single empty row - unless the block genuinely holds zero lines
+    /// because an empty side was picked.
+    fn stored_text(&self, ix: usize, value: &str) -> String {
+        if value.is_empty() {
+            return if self.blocks[ix].middle_text.is_empty() {
+                String::new()
+            } else if self.crlf {
+                "\r\n".to_owned()
+            } else {
+                "\n".to_owned()
+            };
+        }
+        if self.crlf {
+            format!("{}\r\n", value.replace("\r\n", "\n").replace('\n', "\r\n"))
+        } else {
+            format!("{value}\n")
+        }
+    }
+
     /// The block's result text as the embedded editor shows it: without
-    /// the final newline, so Enter at the end grows the block by a real
-    /// line. [`Self::edit`] takes the same shape back.
+    /// the final terminator, and with CRLF endings folded to `\n` so no
+    /// carriage return reaches the editor. [`Self::edit`] takes the same
+    /// shape back.
     pub(crate) fn block_editor_text(&self, ix: usize) -> String {
         let text = &self.blocks[ix].middle_text;
-        text.strip_suffix('\n').unwrap_or(text).to_owned()
+        let text = text.strip_suffix('\n').unwrap_or(text);
+        if self.crlf {
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            text.replace("\r\n", "\n")
+        } else {
+            text.to_owned()
+        }
+    }
+
+    /// The number of middle lines the block currently spans, for sizing
+    /// its embedded editor without walking the row table.
+    pub(crate) fn middle_line_count(&self, ix: usize) -> usize {
+        self.blocks[ix].middle.len()
     }
 
     /// Reassembles the middle lines from the segments, re-derives each
@@ -305,6 +355,7 @@ impl ConflictModel {
     /// Rebuilds the visual rows: context aligns 1:1 across the panes, each
     /// block pads its shorter sides with spacers to its tallest column.
     fn recompute_rows(&mut self) {
+        self.rows_revision += 1;
         fn context(rows: &mut Vec<ConflictRow>, cursors: &mut [usize; 3], count: usize) {
             let [left, middle, right] = *cursors;
             for k in 0..count {
@@ -603,11 +654,81 @@ mod tests {
         assert_eq!(value, "l1\nl2\nl3");
         // Feeding the editor's own text back is no change.
         assert!(!model.edit(0, &value));
-        // Emptying the block keeps its row for the gutter controls.
+        // Deleting all text leaves one blank line, matching the editor's
+        // single empty row; the block keeps its row for the gutter controls.
         assert!(model.edit(0, ""));
         assert_eq!(model.block_editor_text(0), "");
-        assert_eq!(model.result_text(), "a\nb\nbase4\nc\n");
-        assert_eq!(middle(&model), ["a", "·", "·", "·", "b", "base4", "·", "c"]);
+        assert_eq!(model.result_text(), "a\n\nb\nbase4\nc\n");
+        assert_eq!(middle(&model), ["a", "", "·", "·", "b", "base4", "·", "c"]);
+    }
+
+    #[test]
+    fn emptying_a_block_keeps_its_blank_line() {
+        let text = "keep\n<<<<<<< yours\n\n=======\nx\n>>>>>>> upstream\n";
+        let mut model = ConflictModel::parse("a.txt", text).unwrap();
+        model.pick(0, Pick::Yours);
+        // A single blank line seeds the editor as an empty value; syncing
+        // that value back must not drop the line from the result.
+        assert_eq!(model.block_editor_text(0), "");
+        assert!(!model.edit(0, ""));
+        assert_eq!(model.result_text(), "keep\n\n");
+        // Deleting a non-empty pick converges on the same blank line.
+        model.pick(0, Pick::Upstream);
+        assert!(model.edit(0, ""));
+        assert_eq!(model.result_text(), "keep\n\n");
+    }
+
+    #[test]
+    fn a_zero_line_block_stays_empty_through_an_empty_sync() {
+        // Picking an empty side (a deletion) genuinely holds zero lines;
+        // only then does an empty editor value keep the block empty.
+        let text = "keep\n<<<<<<< yours\n=======\nchanged\n>>>>>>> upstream\nend\n";
+        let mut model = ConflictModel::parse("a.txt", text).unwrap();
+        model.pick(0, Pick::Yours);
+        assert!(!model.edit(0, ""));
+        assert_eq!(model.result_text(), "keep\nend\n");
+    }
+
+    #[test]
+    fn crlf_files_keep_their_line_endings() {
+        let text = "fn retry() {\r\n<<<<<<< yours\r\n    3\r\n=======\r\n    5\r\n>>>>>>> upstream\r\n}\r\n";
+        let mut model = ConflictModel::parse("retry.rs", text).unwrap();
+        model.pick(0, Pick::Yours);
+        // The editor never sees a carriage return.
+        assert_eq!(model.block_editor_text(0), "    3");
+        assert!(!model.edit(0, "    3"));
+        // Hand edits write back the file's own endings, uniformly.
+        assert!(model.edit(0, "    3\n    4"));
+        assert_eq!(
+            model.result_text(),
+            "fn retry() {\r\n    3\r\n    4\r\n}\r\n"
+        );
+        assert_eq!(model.block_editor_text(0), "    3\n    4");
+        // An emptied block keeps a CRLF blank line.
+        assert!(model.edit(0, ""));
+        assert_eq!(model.result_text(), "fn retry() {\r\n\r\n}\r\n");
+    }
+
+    #[test]
+    fn equal_height_edits_leave_the_row_table_untouched() {
+        let mut model = ConflictModel::parse("a.txt", TWO_CONFLICTS).unwrap();
+        model.pick(0, Pick::Yours);
+        let revision = model.rows_revision;
+        // Same line count: the text updates without a row table rebuild.
+        assert!(model.edit(0, "l1\nl2 changed\nl3"));
+        assert_eq!(model.rows_revision, revision);
+        assert_eq!(
+            middle(&model),
+            ["a", "l1", "l2 changed", "l3", "b", "base4", "·", "c"]
+        );
+        assert_eq!(model.result_text(), "a\nl1\nl2 changed\nl3\nb\nbase4\nc\n");
+        // A height change still rebuilds the rows.
+        assert!(model.edit(0, "l1\nl2"));
+        assert_ne!(model.rows_revision, revision);
+        assert_eq!(
+            middle(&model),
+            ["a", "l1", "l2", "·", "b", "base4", "·", "c"]
+        );
     }
 
     #[test]
