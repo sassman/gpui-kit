@@ -144,6 +144,15 @@ impl ConflictResolvState {
     pub fn block_count(&self) -> usize {
         self.model.block_count()
     }
+    /// The number of visible rows once unchanged context folds away: fold
+    /// bands count one row each. For a host that must give the virtualized
+    /// view a definite height - content height is this times the row
+    /// height, plus the pane-label header. Derives the folds itself,
+    /// because a host asks before the first render would.
+    pub fn display_len(&mut self) -> usize {
+        self.sync_folds();
+        self.display_rows().len()
+    }
     /// The block's state; a stale index reads as unresolved.
     pub fn resolution(&self, block: usize) -> BlockResolution {
         if block >= self.model.block_count() {

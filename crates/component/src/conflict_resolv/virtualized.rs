@@ -60,6 +60,18 @@ pub struct ConflictResolvVirtual {
 }
 
 impl ConflictResolvVirtual {
+    /// The pane-label band's height. With it, a host can size the view to
+    /// its content: this plus [`ConflictResolvState::display_len`] rows of
+    /// the mono font size times 1.6, the row height used here.
+    pub const HEADER_HEIGHT: Pixels = px(26.);
+
+    /// The uniform row height render derives from the window's mono font;
+    /// published so a host sizing to content cannot drift from it.
+    pub fn row_height(window: &Window, cx: &App) -> Pixels {
+        let rem = window.rem_size();
+        rem * (f32::from(cx.theme().mono_font_size) / 16.) * 1.6
+    }
+
     pub fn new(state: &Entity<ConflictResolvState>) -> Self {
         Self {
             state: state.clone(),
@@ -290,7 +302,7 @@ impl RenderOnce for ConflictResolvVirtual {
         });
         let rem = window.rem_size();
         let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
-        let row_height = font_size * 1.6;
+        let row_height = Self::row_height(window, cx);
         let number_size = font_size * 0.8;
         let font_family = cx.theme().mono_font_family.clone();
         let number_widths;
@@ -608,7 +620,7 @@ fn pane_headers(
     upstream: SharedString,
     ctx: &ItemContext,
 ) -> AnyElement {
-    let header_height = px(26.);
+    let header_height = ConflictResolvVirtual::HEADER_HEIGHT;
     let label = |text: SharedString| {
         h_flex()
             .flex_1()
