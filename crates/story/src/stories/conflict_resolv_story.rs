@@ -51,7 +51,7 @@ impl super::Story for ConflictResolvStory {
     }
 
     fn description() -> &'static str {
-        "Three-pane merge conflict resolution: your changes, the result, upstream changes."
+        "Three-pane merge conflict resolution: your changes, the editable result, upstream changes."
     }
 
     fn new_view(window: &mut Window, cx: &mut App) -> Entity<impl Render> {
@@ -65,6 +65,12 @@ impl ConflictResolvStory {
             let state = cx.new(|_| {
                 ConflictResolvState::parse("src/retry.rs", CONFLICTED)
                     .expect("Story conflict is valid")
+            });
+            // One block arrives picked and adjusted by hand, so the gallery
+            // shows the embedded result editor and the hand-edited tint.
+            state.update(cx, |state, cx| {
+                state.take_upstream(1, cx);
+                state.edit_block(1, "        Duration::from_millis(250) * attempt", cx);
             });
             Self {
                 // Picks notify observers; observing keeps the counter current.

@@ -59,12 +59,16 @@ pub(crate) struct ConflictRow {
 }
 
 /// One conflict region. Column ranges on the sides are fixed; the middle
-/// range shifts as earlier blocks are spliced.
+/// range is derived by `refresh` from the segments before the block.
 struct Block {
     yours: Range<usize>,
     upstream: Range<usize>,
     middle: Range<usize>,
-    /// Raw side texts kept for splicing, every line newline-terminated
+    /// The block's current slice of the result: base lines at first, a
+    /// pick's lines after, free text once the embedded editor ran. Every
+    /// line newline-terminated, or empty.
+    middle_text: String,
+    /// Raw side texts kept for picking, every line newline-terminated
     /// because a marker line always follows a side's last line.
     yours_text: String,
     upstream_text: String,
@@ -74,15 +78,27 @@ struct Block {
     resolution: BlockResolution,
 }
 
+/// One span of the middle column, in file order.
+enum MiddleSegment {
+    /// Shared lines outside every conflict, raw and newline-terminated.
+    /// Strictly read-only.
+    Context(String),
+    /// The block whose `middle_text` fills this span; editable through
+    /// [`ConflictModel::edit`] once the block is resolved.
+    Block(usize),
+}
+
 /// Three derived columns, the conflict blocks, and the visual row table.
 ///
-/// The middle is one plain string buffer so a later iteration can hand it to
-/// an embedded editor unchanged; the cached lines only serve display.
+/// The middle column is a sequence of segments so each block owns its slice
+/// of the result: an embedded editor can replace one block's text without
+/// splicing a shared buffer, and undo is a plain reset to the base lines.
+/// The cached lines only serve display.
 pub(crate) struct ConflictModel {
     path: SharedString,
     yours: Vec<SharedString>,
     upstream: Vec<SharedString>,
-    middle: String,
+    segments: Vec<MiddleSegment>,
     middle_lines: Vec<SharedString>,
     blocks: Vec<Block>,
     rows: Vec<ConflictRow>,
@@ -116,20 +132,14 @@ impl ConflictModel {
             path,
             yours: Vec::new(),
             upstream: Vec::new(),
-            middle: String::new(),
+            segments: Vec::new(),
             middle_lines: Vec::new(),
             blocks: Vec::new(),
             rows: Vec::new(),
         };
         let mut cursor = 1;
-        let mut middle_len = 0;
         for conflict in file.conflicts() {
-            for line in &lines[cursor - 1..conflict.lines().start - 1] {
-                model.yours.push(display(line));
-                model.upstream.push(display(line));
-                model.middle.push_str(line);
-                middle_len += 1;
-            }
+            model.push_context(&lines[cursor - 1..conflict.lines().start - 1]);
             cursor = conflict.lines().end;
             let yours_text = slice(conflict.current_lines());
             let upstream_text = slice(conflict.incoming_lines());
@@ -138,13 +148,15 @@ impl ConflictModel {
             model.yours.extend(display_lines(&yours_text));
             let upstream = model.upstream.len()..model.upstream.len() + line_count(&upstream_text);
             model.upstream.extend(display_lines(&upstream_text));
-            let middle = middle_len..middle_len + line_count(&base_text);
-            model.middle.push_str(&base_text);
-            middle_len = middle.end;
+            model
+                .segments
+                .push(MiddleSegment::Block(model.blocks.len()));
             model.blocks.push(Block {
                 yours,
                 upstream,
-                middle,
+                // Derived by refresh below, like after every later change.
+                middle: 0..0,
+                middle_text: base_text.clone(),
                 yours_text,
                 upstream_text,
                 base_text,
@@ -153,13 +165,21 @@ impl ConflictModel {
                 resolution: BlockResolution::Unresolved,
             });
         }
-        for line in &lines[cursor - 1..] {
-            model.yours.push(display(line));
-            model.upstream.push(display(line));
-            model.middle.push_str(line);
-        }
+        model.push_context(&lines[cursor - 1..]);
         model.refresh();
         Ok(model)
+    }
+
+    /// Shared lines outside every conflict reach all three columns.
+    fn push_context(&mut self, lines: &[&str]) {
+        if lines.is_empty() {
+            return;
+        }
+        for line in lines {
+            self.yours.push(display(line));
+            self.upstream.push(display(line));
+        }
+        self.segments.push(MiddleSegment::Context(lines.concat()));
     }
 
     pub(crate) fn path(&self) -> &SharedString {
@@ -188,9 +208,16 @@ impl ConflictModel {
             .iter()
             .all(|block| block.resolution != BlockResolution::Unresolved)
     }
-    /// The middle buffer: the merge result once every block is resolved.
+    /// The middle column's text: the merge result once every block is
+    /// resolved, reflecting every pick and hand edit as it stands.
     pub(crate) fn result_text(&self) -> String {
-        self.middle.clone()
+        self.segments
+            .iter()
+            .map(|segment| match segment {
+                MiddleSegment::Context(text) => text.as_str(),
+                MiddleSegment::Block(ix) => self.blocks[*ix].middle_text.as_str(),
+            })
+            .collect()
     }
     pub(crate) fn yours_label(&self, ix: usize) -> &SharedString {
         &self.blocks[ix].yours_label
@@ -200,7 +227,7 @@ impl ConflictModel {
     }
 
     pub(crate) fn pick(&mut self, ix: usize, pick: Pick) {
-        let block = &self.blocks[ix];
+        let block = &mut self.blocks[ix];
         let (text, resolution) = match pick {
             Pick::Yours => (block.yours_text.clone(), BlockResolution::TakenYours),
             Pick::Upstream => (block.upstream_text.clone(), BlockResolution::TakenUpstream),
@@ -209,57 +236,69 @@ impl ConflictModel {
                 BlockResolution::Both,
             ),
         };
-        self.splice(ix, &text);
-        self.blocks[ix].resolution = resolution;
+        block.middle_text = text;
+        block.resolution = resolution;
         self.refresh();
     }
 
     /// Restores the block's base lines and the unresolved state.
     pub(crate) fn undo(&mut self, ix: usize) {
-        let text = self.blocks[ix].base_text.clone();
-        self.splice(ix, &text);
-        self.blocks[ix].resolution = BlockResolution::Unresolved;
+        let block = &mut self.blocks[ix];
+        block.middle_text = block.base_text.clone();
+        block.resolution = BlockResolution::Unresolved;
         self.refresh();
     }
 
-    /// Marks a block the embedded editor changed; the splice already
-    /// happened as an editor edit, so only the state moves.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Marks a block the embedded editor changed; the text already moved
+    /// through [`Self::edit`], so only the state follows.
     pub(crate) fn mark_hand_edited(&mut self, ix: usize) {
         self.blocks[ix].resolution = BlockResolution::HandEdited;
     }
 
-    /// The byte where the zero-based middle line starts; the buffer length
-    /// for the line past the end, so empty ranges splice as insertions.
-    fn line_start_byte(&self, line: usize) -> usize {
-        self.middle
-            .split_inclusive('\n')
-            .take(line)
-            .map(str::len)
-            .sum()
-    }
-
-    /// Replaces the block's middle lines and shifts the later blocks.
-    fn splice(&mut self, ix: usize, text: &str) {
-        debug_assert!(
-            text.is_empty() || text.ends_with('\n'),
-            "side and base texts are newline-terminated by the markers after them"
-        );
-        let range = self.blocks[ix].middle.clone();
-        let start = self.line_start_byte(range.start);
-        let end = self.line_start_byte(range.end);
-        self.middle.replace_range(start..end, text);
-        let new_len = line_count(text);
-        self.blocks[ix].middle = range.start..range.start + new_len;
-        for block in &mut self.blocks[ix + 1..] {
-            // Later ranges sit past the spliced one, so this stays in bounds.
-            block.middle = block.middle.start + new_len - range.len()
-                ..block.middle.end + new_len - range.len();
+    /// Applies the embedded editor's value to a block and reports whether
+    /// the text changed. The editor shows lines without the final newline
+    /// the stored texts carry, so the value gains one back; an unresolved
+    /// block is read-only until a pick and refuses the edit.
+    pub(crate) fn edit(&mut self, ix: usize, value: &str) -> bool {
+        if self.blocks[ix].resolution == BlockResolution::Unresolved {
+            return false;
         }
+        let text = if value.is_empty() {
+            String::new()
+        } else {
+            format!("{value}\n")
+        };
+        if self.blocks[ix].middle_text == text {
+            return false;
+        }
+        self.blocks[ix].middle_text = text;
+        self.refresh();
+        true
     }
 
+    /// The block's result text as the embedded editor shows it: without
+    /// the final newline, so Enter at the end grows the block by a real
+    /// line. [`Self::edit`] takes the same shape back.
+    pub(crate) fn block_editor_text(&self, ix: usize) -> String {
+        let text = &self.blocks[ix].middle_text;
+        text.strip_suffix('\n').unwrap_or(text).to_owned()
+    }
+
+    /// Reassembles the middle lines from the segments, re-derives each
+    /// block's middle range, and rebuilds the row table.
     fn refresh(&mut self) {
-        self.middle_lines = display_lines(&self.middle);
+        self.middle_lines.clear();
+        for i in 0..self.segments.len() {
+            match &self.segments[i] {
+                MiddleSegment::Context(text) => self.middle_lines.extend(display_lines(text)),
+                &MiddleSegment::Block(ix) => {
+                    let start = self.middle_lines.len();
+                    self.middle_lines
+                        .extend(display_lines(&self.blocks[ix].middle_text));
+                    self.blocks[ix].middle = start..self.middle_lines.len();
+                }
+            }
+        }
         self.recompute_rows();
     }
 
@@ -499,6 +538,100 @@ mod tests {
         assert_eq!(model.rows().len(), 1);
         model.undo(0);
         assert_eq!(model.resolution(0), BlockResolution::Unresolved);
+    }
+
+    #[test]
+    fn edits_grow_and_shrink_the_block_rows() {
+        let mut model = ConflictModel::parse("a.txt", TWO_CONFLICTS).unwrap();
+        model.pick(0, Pick::Upstream);
+        // One middle line against three on the left: the block holds three rows.
+        assert_eq!(model.rows().len(), 8);
+        // Growing past both sides stretches the block; left and right pad out.
+        assert!(model.edit(0, "r1\nr1b\nr1c\nr1d\nr1e"));
+        assert_eq!(
+            model.result_text(),
+            "a\nr1\nr1b\nr1c\nr1d\nr1e\nb\nbase4\nc\n"
+        );
+        assert_eq!(
+            middle(&model),
+            [
+                "a", "r1", "r1b", "r1c", "r1d", "r1e", "b", "base4", "·", "c"
+            ]
+        );
+        assert_eq!(
+            left(&model),
+            ["a", "l1", "l2", "l3", "·", "·", "b", "l4", "·", "c"]
+        );
+        assert_eq!(
+            right(&model),
+            ["a", "r1", "·", "·", "·", "·", "b", "r4", "r5", "c"]
+        );
+        // Shrinking narrows the middle back below the left side's height.
+        assert!(model.edit(0, "only"));
+        assert_eq!(model.result_text(), "a\nonly\nb\nbase4\nc\n");
+        assert_eq!(
+            middle(&model),
+            ["a", "only", "·", "·", "b", "base4", "·", "c"]
+        );
+        // The later block's queries still address the shifted range.
+        model.pick(1, Pick::Yours);
+        assert_eq!(model.result_text(), "a\nonly\nb\nl4\nc\n");
+    }
+
+    #[test]
+    fn enter_above_and_below_grow_the_region() {
+        let mut model = ConflictModel::parse("retry.rs", TWO_WAY).unwrap();
+        model.pick(0, Pick::Yours);
+        assert_eq!(model.rows().len(), 3);
+        // Enter at the end of the editor region: the value keeps a trailing
+        // newline, so the block gains an empty last line.
+        assert!(model.edit(0, "    3\n"));
+        assert_eq!(model.result_text(), "fn retry() {\n    3\n\n}\n");
+        assert_eq!(middle(&model), ["fn retry() {", "    3", "", "}"]);
+        assert_eq!(left(&model), ["fn retry() {", "    3", "·", "}"]);
+        // Enter at the start: an empty first line inside the block.
+        assert!(model.edit(0, "\n    3"));
+        assert_eq!(model.result_text(), "fn retry() {\n\n    3\n}\n");
+        assert_eq!(middle(&model), ["fn retry() {", "", "    3", "}"]);
+    }
+
+    #[test]
+    fn editor_text_round_trips_and_equal_edits_are_refused() {
+        let mut model = ConflictModel::parse("a.txt", TWO_CONFLICTS).unwrap();
+        model.pick(0, Pick::Yours);
+        let value = model.block_editor_text(0);
+        assert_eq!(value, "l1\nl2\nl3");
+        // Feeding the editor's own text back is no change.
+        assert!(!model.edit(0, &value));
+        // Emptying the block keeps its row for the gutter controls.
+        assert!(model.edit(0, ""));
+        assert_eq!(model.block_editor_text(0), "");
+        assert_eq!(model.result_text(), "a\nb\nbase4\nc\n");
+        assert_eq!(middle(&model), ["a", "·", "·", "·", "b", "base4", "·", "c"]);
+    }
+
+    #[test]
+    fn unresolved_blocks_refuse_edits() {
+        let mut model = ConflictModel::parse("retry.rs", TWO_WAY).unwrap();
+        assert!(!model.edit(0, "typed"));
+        assert_eq!(model.result_text(), "fn retry() {\n}\n");
+        assert_eq!(model.resolution(0), BlockResolution::Unresolved);
+    }
+
+    #[test]
+    fn undo_after_a_hand_edit_restores_base_and_height() {
+        let mut model = ConflictModel::parse("a.txt", DIFF3).unwrap();
+        let rows_before = model.rows().len();
+        model.pick(0, Pick::Both);
+        assert!(model.edit(0, "left one\nleft two\nright\nextra"));
+        model.mark_hand_edited(0);
+        assert_eq!(model.resolution(0), BlockResolution::HandEdited);
+        assert_eq!(model.rows().len(), rows_before + 2);
+        model.undo(0);
+        assert_eq!(model.resolution(0), BlockResolution::Unresolved);
+        assert_eq!(model.result_text(), "head\nold\ntail\n");
+        assert_eq!(model.rows().len(), rows_before);
+        assert_eq!(middle(&model), ["head", "old", "·", "tail"]);
     }
 
     #[test]

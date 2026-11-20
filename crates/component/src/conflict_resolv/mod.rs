@@ -1,8 +1,9 @@
 //! JetBrains-style three-pane conflict resolution: your changes left, the
 //! derived result middle, upstream changes right. Lives beside [`crate::diff`]
 //! and shares its visual idiom; the diff surface itself stays read-only.
-//! The middle pane is read-only derived text in this iteration; a later one
-//! embeds an editor over the same single result buffer.
+//! Once a block is resolved its middle region becomes an embedded editor,
+//! so the reviewer can adjust the picked text by hand; context lines stay
+//! strictly read-only.
 mod model;
 mod state;
 
@@ -22,6 +23,7 @@ use crate::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::TextareaState,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -35,6 +37,11 @@ use crate::{
 /// · feature". Per-block pick arrows sit in the middle pane's edge gutters,
 /// whose outer borders divide the panes, while take-both floats centered
 /// over the result; block backgrounds tint by resolution state.
+///
+/// A resolved block's middle region is an embedded editor: the reviewer
+/// picks a side, then adjusts the result by hand, Enter adding lines inside
+/// the block. The first divergence tints the block as hand-edited. Context
+/// lines and unresolved blocks stay read-only.
 #[derive(IntoElement)]
 pub struct ConflictResolv {
     state: Entity<ConflictResolvState>,
@@ -143,11 +150,17 @@ fn render_pane(
     cell: impl Fn(&ConflictRow) -> ConflictCell,
     lines: &[SharedString],
     backgrounds: &[Option<Hsla>],
+    // Per block, the editor that replaces the block's line cells in this
+    // pane; only the middle pane passes any.
+    editors: &[Option<Entity<TextareaState>>],
     overlays: Vec<(usize, AnyElement)>,
     style: &PaneStyle,
 ) -> AnyElement {
     let mut numbers = v_flex().w(style.number_width(lines.len())).flex_none();
     let mut body = v_flex().min_w_full();
+    // Body rows an editor already spans; their numbers still render.
+    let mut covered = 0_usize;
+    let mut editor_seen = None;
     for (row_ix, row) in rows.iter().enumerate() {
         let (number, content) = match cell(row) {
             ConflictCell::Line(ix) => (Some((ix + 1).to_string()), Some(lines[ix].clone())),
@@ -164,6 +177,37 @@ fn render_pane(
                 .when_some(backgrounds[row_ix], |this, bg| this.bg(bg))
                 .when_some(number, |this, number| this.child(number)),
         );
+        if covered > 0 {
+            covered -= 1;
+            continue;
+        }
+        if let ConflictRowKind::Block(ix) = row.kind
+            && let Some(Some(editor)) = editors.get(ix)
+            && editor_seen != Some(ix)
+        {
+            editor_seen = Some(ix);
+            // The block's line cells fill its first rows; the editor spans
+            // exactly those, sized by the current line count so its rows
+            // land on the row grid. An empty block still spans one row.
+            let span = rows
+                .iter()
+                .filter(|row| {
+                    matches!(row.kind, ConflictRowKind::Block(block) if block == ix)
+                        && matches!(cell(row), ConflictCell::Line(_))
+                })
+                .count()
+                .max(1);
+            covered = span - 1;
+            body = body.child(
+                div()
+                    .h(style.row_height * span as f32)
+                    .px_2()
+                    .line_height(style.row_height)
+                    .when_some(backgrounds[row_ix], |this, bg| this.bg(bg))
+                    .child(editor.clone()),
+            );
+            continue;
+        }
         body = body.child(
             h_flex()
                 .h(style.row_height)
@@ -349,6 +393,10 @@ fn render_gutter(
 
 impl RenderOnce for ConflictResolv {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Mount or drop the per-block result editors before reading: render
+        // is the only place a window exists to create input states in.
+        self.state
+            .update(cx, |state, cx| state.sync_editors(window, cx));
         let rem = window.rem_size();
         let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
         let style = PaneStyle {
@@ -371,6 +419,9 @@ impl RenderOnce for ConflictResolv {
         let upstream: Vec<SharedString> = state.upstream_lines().to_vec();
         let resolutions: Vec<BlockResolution> = (0..state.block_count())
             .map(|ix| state.resolution(ix))
+            .collect();
+        let editors: Vec<Option<Entity<TextareaState>>> = (0..state.block_count())
+            .map(|ix| state.editor(ix).cloned())
             .collect();
         let backgrounds: Vec<Option<Hsla>> = rows
             .iter()
@@ -416,6 +467,7 @@ impl RenderOnce for ConflictResolv {
                 |row| row.left,
                 &yours,
                 &backgrounds,
+                &[],
                 Vec::new(),
                 &style,
             ))
@@ -436,6 +488,7 @@ impl RenderOnce for ConflictResolv {
                 |row| row.middle,
                 &middle,
                 &backgrounds,
+                &editors,
                 take_both_overlays,
                 &style,
             ))
@@ -456,6 +509,7 @@ impl RenderOnce for ConflictResolv {
                 |row| row.right,
                 &upstream,
                 &backgrounds,
+                &[],
                 Vec::new(),
                 &style,
             ))
