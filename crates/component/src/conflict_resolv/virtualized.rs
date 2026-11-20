@@ -9,9 +9,9 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Entity, EntityId, Font, Global, HighlightStyle, Hsla,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Pixels,
-    RenderOnce, ScrollHandle, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, StyledText, Subscription, Task, TextRun, Window, div, list,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Pixels, RenderOnce, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, StyledText, Subscription, Task, TextRun, Window, div, list,
     prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::input::HighlightStyleResolver;
@@ -210,6 +210,10 @@ struct Retained {
     widths: [Pixels; 3],
     widths_key: Option<(u64, Pixels, SharedString)>,
     presentation: Option<Arc<ConflictPresentation>>,
+    /// Where the list stood before the wheel turn being dispatched; the
+    /// root's wheel listener runs after the list's own, so comparing
+    /// against this tells whether the list consumed the turn.
+    last_wheel_top: ListOffset,
     /// The row-table revision `presentation` was prepared from.
     presented: Option<u64>,
     preparing: Option<u64>,
@@ -243,6 +247,7 @@ fn retained_entry(state: &Entity<ConflictResolvState>, cx: &mut App) -> Rc<RefCe
         widths: [px(0.); 3],
         widths_key: None,
         presentation: None,
+        last_wheel_top: ListOffset::default(),
         presented: None,
         preparing: None,
         task: Task::ready(()),
@@ -389,6 +394,9 @@ impl RenderOnce for ConflictResolvVirtual {
                 }),
             )
         };
+        // Re-anchor the wheel comparison each frame; the list notifies on
+        // every consumed turn, so a fresh render always lands in between.
+        retained.borrow_mut().last_wheel_top = list_state.logical_scroll_top();
         let has_rows = !item_context.items.is_empty();
         let header = pane_headers(
             self.yours_label
@@ -489,6 +497,24 @@ impl RenderOnce for ConflictResolvVirtual {
             .text_color(cx.theme().foreground)
             .border_1()
             .border_color(cx.theme().border)
+            // A host may stack this view inside its own scroll column. The
+            // list's listener has already run by bubble time here: when it
+            // consumed the turn the host must not scroll too, and only a
+            // list sitting at its edge (or fitting its frame) lets the
+            // turn through so the host can carry on past this file.
+            .on_scroll({
+                let retained = retained.clone();
+                move |event, window, cx| {
+                    if event.delta.pixel_delta(window.line_height()).y == px(0.) {
+                        return;
+                    }
+                    let mut retained = retained.borrow_mut();
+                    let top = retained.list.logical_scroll_top();
+                    if std::mem::replace(&mut retained.last_wheel_top, top) != top {
+                        cx.stop_propagation();
+                    }
+                }
+            })
             .child(header)
             .child(body)
             .refine_style(&self.style)
