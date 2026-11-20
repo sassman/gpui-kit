@@ -354,6 +354,13 @@ impl ConflictResolvState {
     pub(crate) fn rows(&self) -> &[ConflictRow] {
         self.model.rows()
     }
+    /// The model's row-table revision; the virtualized renderer keys its
+    /// prepared highlighting and measured column widths on it. Rendered text
+    /// only changes when the table does: a same-height edit skips the bump,
+    /// but those lines sit behind the block's embedded editor.
+    pub(crate) fn rows_revision(&self) -> u64 {
+        self.model.rows_revision()
+    }
     pub(crate) fn yours_lines(&self) -> &[SharedString] {
         self.model.yours_lines()
     }

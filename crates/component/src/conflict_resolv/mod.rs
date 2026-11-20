@@ -6,9 +6,11 @@
 //! strictly read-only.
 mod model;
 mod state;
+mod virtualized;
 
 pub use model::BlockResolution;
 pub use state::{ConflictResolvEvent, ConflictResolvState};
+pub use virtualized::ConflictResolvVirtual;
 
 use model::{ConflictCell, ConflictRow, ConflictRowKind};
 use state::DisplayRow;
@@ -100,17 +102,20 @@ impl ConflictResolv {
     }
 
     fn tint(&self, resolution: BlockResolution, cx: &App) -> Hsla {
-        if let Some(color) = self.tints[tint_slot(resolution)] {
-            return color;
-        }
-        // Unresolved stands out; a resolved tint reads as a quiet wash.
-        match resolution {
-            BlockResolution::Unresolved => cx.theme().warning.opacity(0.2),
-            BlockResolution::TakenYours => cx.theme().success.opacity(0.12),
-            BlockResolution::TakenUpstream => cx.theme().info.opacity(0.12),
-            BlockResolution::Both => cx.theme().primary.opacity(0.12),
-            BlockResolution::HandEdited => cx.theme().muted_foreground.opacity(0.12),
-        }
+        self.tints[tint_slot(resolution)].unwrap_or_else(|| default_tint(resolution, cx))
+    }
+}
+
+/// Theme-following block tints, shared with [`ConflictResolvVirtual`] so the
+/// two renderers never drift apart. Unresolved stands out; a resolved tint
+/// reads as a quiet wash.
+fn default_tint(resolution: BlockResolution, cx: &App) -> Hsla {
+    match resolution {
+        BlockResolution::Unresolved => cx.theme().warning.opacity(0.2),
+        BlockResolution::TakenYours => cx.theme().success.opacity(0.12),
+        BlockResolution::TakenUpstream => cx.theme().info.opacity(0.12),
+        BlockResolution::Both => cx.theme().primary.opacity(0.12),
+        BlockResolution::HandEdited => cx.theme().muted_foreground.opacity(0.12),
     }
 }
 
