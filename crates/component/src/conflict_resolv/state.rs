@@ -1,6 +1,6 @@
 //! Retained resolver state for one conflicted file, owned by the view that
 //! renders [`super::ConflictResolv`].
-use gpui::{AppContext as _, Context, Entity, EventEmitter, SharedString, Subscription, Window};
+use gpui::{AppContext as _, Context, Entity, EventEmitter, SharedString, Window};
 
 use super::model::{BlockResolution, ConflictModel, ConflictRow, Pick};
 use crate::diff::DiffParseError;
@@ -24,13 +24,6 @@ pub enum ConflictResolvEvent {
     Edited,
 }
 
-/// The embedded result editor of one resolved block, with the subscription
-/// that syncs its text back into the model.
-struct BlockEditor {
-    input: Entity<TextareaState>,
-    _subscription: Subscription,
-}
-
 /// The three derived columns of one conflicted file and each block's
 /// resolution, created with [`Self::parse`] inside the owner's entity.
 ///
@@ -40,12 +33,22 @@ pub struct ConflictResolvState {
     model: ConflictModel,
     /// One lazily mounted editor per block, present while the block is
     /// resolved. A block resolved by a pick becomes editable; undo drops
-    /// its editor and returns the middle to read-only base lines.
-    editors: Vec<Option<BlockEditor>>,
+    /// its editor and returns the middle to read-only base lines. Only the
+    /// entity is held, never its change subscription: a `Subscription` is
+    /// not `Send`, and owners parse this state on background threads.
+    editors: Vec<Option<Entity<TextareaState>>>,
     /// Blocks whose mounted editor must be reseeded because the model
     /// changed the text underneath it (a pick over a hand edit).
     stale: Vec<bool>,
 }
+
+// Owners parse off the UI thread and send the state back, so it must stay
+// `Send`; a field that loses it (a `Subscription`, say) must fail here, not
+// in a downstream build.
+const _: () = {
+    const fn require_send<T: Send>() {}
+    require_send::<ConflictResolvState>()
+};
 
 impl EventEmitter<ConflictResolvEvent> for ConflictResolvState {}
 
@@ -217,22 +220,22 @@ impl ConflictResolvState {
                             .soft_wrap(false)
                             .default_value(text)
                     });
-                    let subscription =
-                        cx.subscribe(&input, move |this, input, event: &InputEvent, cx| {
-                            if matches!(event, InputEvent::Change) {
-                                let value = input.read(cx).value();
-                                this.apply_edit(block, &value, cx);
-                            }
-                        });
-                    self.editors[block] = Some(BlockEditor {
-                        input,
-                        _subscription: subscription,
-                    });
+                    // Detached, not held: GPUI releases the subscription with
+                    // the editor entity when undo drops it, and holding it
+                    // here would cost the state its `Send`.
+                    cx.subscribe(&input, move |this, input, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let value = input.read(cx).value();
+                            this.apply_edit(block, &value, cx);
+                        }
+                    })
+                    .detach();
+                    self.editors[block] = Some(input);
                     self.stale[block] = false;
                 }
                 Some(editor) if self.stale[block] => {
                     let text = self.model.block_editor_text(block);
-                    let input = editor.input.clone();
+                    let input = editor.clone();
                     // `set_value` emits no change event, and syncing back an
                     // unchanged text is refused anyway, so no feedback loop.
                     input.update(cx, |state, cx| state.set_value(text, window, cx));
@@ -246,10 +249,7 @@ impl ConflictResolvState {
     /// The block's mounted result editor, present while the block is
     /// resolved and [`Self::sync_editors`] ran since.
     pub(crate) fn editor(&self, block: usize) -> Option<&Entity<TextareaState>> {
-        self.editors
-            .get(block)?
-            .as_ref()
-            .map(|editor| &editor.input)
+        self.editors.get(block)?.as_ref()
     }
 
     /// The number of middle lines the block currently spans; sizes the
