@@ -143,9 +143,24 @@ impl PaneStyle {
     /// The gutter width that fits the pane's largest line number, sized
     /// like the Diff component's gutter.
     fn number_width(&self, lines: usize) -> Pixels {
-        let digits = lines.max(1).to_string().len();
-        self.number_size * 0.7 * digits as f32 + self.rem
+        number_column_width(lines, self.number_size, self.rem)
     }
+}
+
+/// The gutter width that fits a pane's largest line number, shared by the
+/// retained and the virtualized renderer so the two never drift apart.
+pub(super) fn number_column_width(lines: usize, number_size: Pixels, rem: Pixels) -> Pixels {
+    let digits = lines.max(1).to_string().len();
+    number_size * 0.7 * digits as f32 + rem
+}
+
+/// The pane labels used when a host sets none, shared by both renderers.
+pub(super) fn pane_label_defaults() -> (SharedString, SharedString, SharedString) {
+    (
+        t!("ConflictResolv.YourChanges").to_string().into(),
+        t!("ConflictResolv.Result").to_string().into(),
+        t!("ConflictResolv.UpstreamChanges").to_string().into(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,8 +457,8 @@ impl RenderOnce for ConflictResolv {
         let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
         let style = PaneStyle {
             rem,
-            row_height: font_size * 1.6,
-            header_height: px(26.),
+            row_height: ConflictResolvVirtual::row_height(window, cx),
+            header_height: ConflictResolvVirtual::HEADER_HEIGHT,
             font_size,
             // Quieter than the code, as in the Diff gutter.
             number_size: font_size * 0.8,
@@ -486,18 +501,10 @@ impl RenderOnce for ConflictResolv {
             })
             .collect();
         let anchor_rows = control_anchor_rows(display, rows);
-        let yours_label = self
-            .yours_label
-            .clone()
-            .unwrap_or_else(|| t!("ConflictResolv.YourChanges").to_string().into());
-        let result_label = self
-            .result_label
-            .clone()
-            .unwrap_or_else(|| t!("ConflictResolv.Result").to_string().into());
-        let upstream_label = self
-            .upstream_label
-            .clone()
-            .unwrap_or_else(|| t!("ConflictResolv.UpstreamChanges").to_string().into());
+        let defaults = pane_label_defaults();
+        let yours_label = self.yours_label.clone().unwrap_or(defaults.0);
+        let result_label = self.result_label.clone().unwrap_or(defaults.1);
+        let upstream_label = self.upstream_label.clone().unwrap_or(defaults.2);
         let take_both_overlays: Vec<(usize, AnyElement)> = anchor_rows
             .iter()
             .enumerate()

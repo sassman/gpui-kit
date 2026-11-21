@@ -60,16 +60,29 @@ pub struct ConflictResolvVirtual {
 }
 
 impl ConflictResolvVirtual {
-    /// The pane-label band's height. With it, a host can size the view to
-    /// its content: this plus [`ConflictResolvState::display_len`] rows of
-    /// the mono font size times 1.6, the row height used here.
+    /// The pane-label band's height. [`Self::frame_height`] is the full
+    /// sizing recipe; this part is published for a host that lays the
+    /// band out on its own.
     pub const HEADER_HEIGHT: Pixels = px(26.);
+
+    /// The root border's two horizontal edges. They sit inside a host's
+    /// frame, so a frame sized from the band and rows alone leaves the
+    /// list short by this - scrollable, eating the first wheel turn.
+    const FRAME_BORDER: Pixels = px(2.);
 
     /// The uniform row height render derives from the window's mono font;
     /// published so a host sizing to content cannot drift from it.
     pub fn row_height(window: &Window, cx: &App) -> Pixels {
         let rem = window.rem_size();
         rem * (f32::from(cx.theme().mono_font_size) / 16.) * 1.6
+    }
+
+    /// The exact frame height for `rows` display rows
+    /// ([`ConflictResolvState::display_len`]): the pane-label band, the
+    /// rows and the root border. A frame sized to this never scrolls
+    /// within itself, so every wheel turn is the host's.
+    pub fn frame_height(rows: usize, window: &Window, cx: &App) -> Pixels {
+        Self::HEADER_HEIGHT + Self::row_height(window, cx) * rows as f32 + Self::FRAME_BORDER
     }
 
     pub fn new(state: &Entity<ConflictResolvState>) -> Self {
@@ -321,15 +334,12 @@ impl RenderOnce for ConflictResolvVirtual {
                 })
                 .collect();
             let items = derive_items(state.display_rows(), state.rows(), &spans);
-            let number_width = |lines: usize| {
-                let digits = lines.max(1).to_string().len();
-                number_size * 0.7 * digits as f32 + rem
-            };
             number_widths = [
-                number_width(state.yours_lines().len()),
-                number_width(state.middle_lines().len()),
-                number_width(state.upstream_lines().len()),
-            ];
+                state.yours_lines().len(),
+                state.middle_lines().len(),
+                state.upstream_lines().len(),
+            ]
+            .map(|lines| super::number_column_width(lines, number_size, rem));
             let mut retained = retained.borrow_mut();
             if retained.row_height != Some(row_height) {
                 retained.row_height = Some(row_height);
@@ -398,13 +408,11 @@ impl RenderOnce for ConflictResolvVirtual {
         // every consumed turn, so a fresh render always lands in between.
         retained.borrow_mut().last_wheel_top = list_state.logical_scroll_top();
         let has_rows = !item_context.items.is_empty();
+        let defaults = super::pane_label_defaults();
         let header = pane_headers(
-            self.yours_label
-                .unwrap_or_else(|| t!("ConflictResolv.YourChanges").to_string().into()),
-            self.result_label
-                .unwrap_or_else(|| t!("ConflictResolv.Result").to_string().into()),
-            self.upstream_label
-                .unwrap_or_else(|| t!("ConflictResolv.UpstreamChanges").to_string().into()),
+            self.yours_label.unwrap_or(defaults.0),
+            self.result_label.unwrap_or(defaults.1),
+            self.upstream_label.unwrap_or(defaults.2),
             &item_context,
         );
         let items = item_context.clone();
@@ -526,6 +534,8 @@ impl Retained {
     /// the whole file before every row has been rendered.
     fn apply_row_height_hint(&self) {
         if let Some(height) = self.row_height {
+            // `ListState` is a shared handle: the builder call mutates the
+            // one list, and the clone only satisfies its by-value `self`.
             let _ = self.list.clone().with_uniform_item_height(height);
         }
     }
@@ -822,7 +832,7 @@ fn render_editor_item(
             ctx,
         ))
         .child(gutter_column(true, controls, ctx))
-        .child(editor_column(block, cells(|row| row.middle), editor, ctx))
+        .child(editor_column(cells(|row| row.middle), editor, ctx))
         .child(gutter_column(false, controls, ctx))
         .child(pane_column(
             Pane::Upstream,
@@ -882,6 +892,20 @@ fn pane_code_id(pane: Pane, item: usize) -> (&'static str, usize) {
             Pane::Upstream => "crv-upstream",
         },
         item,
+    )
+}
+
+/// Ids for an editor item's side columns, apart from [`pane_code_id`]'s:
+/// both kinds sit under the one list, so a block and the display row of
+/// the same index must not share an element id (and its state).
+fn pane_block_id(pane: Pane, block: usize) -> (&'static str, usize) {
+    (
+        match pane {
+            Pane::Yours => "crv-yours-block",
+            Pane::Result => "crv-result-block",
+            Pane::Upstream => "crv-upstream-block",
+        },
+        block,
     )
 }
 
@@ -967,7 +991,7 @@ fn pane_column(
         )
         .child(
             div()
-                .id(pane_code_id(pane, block))
+                .id(pane_block_id(pane, block))
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -991,12 +1015,10 @@ fn pane_column(
 /// The middle pane of an editor item: numbers beside the embedded editor,
 /// which replaces the block's line cells wholesale.
 fn editor_column(
-    block: usize,
     cells: Vec<ConflictCell>,
     editor: Entity<crate::input::TextareaState>,
     ctx: &Rc<ItemContext>,
 ) -> AnyElement {
-    let _ = block;
     h_flex()
         .flex_1()
         .min_w_0()
